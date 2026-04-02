@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  etf-manager:
+    build: .
+    container_name: etf-manager-app
+    ports:
+      - "35000:5000"
+    volumes:
+      - .:/app
+    environment:
+      - TZ=Asia/Seoul
+    restart: always

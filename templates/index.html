@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>포트폴리오 관리 시스템</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Malgun Gothic', sans-serif; padding: 20px; color: #333; background-color: #f5f6fa; }
+        .header { background-color: #2c3e50; color: white; padding: 15px 20px; border-radius: 5px 5px 0 0; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+        .header h2 { margin: 0; font-size: 1.5em; }
+
+        .tab { overflow: hidden; border: 1px solid #ccc; background-color: #f1f1f1; border-radius: 5px 5px 0 0; display: flex; }
+        .tab button { background-color: inherit; flex: 1; border: none; outline: none; cursor: pointer; padding: 13px 6px; font-size: 13px; font-weight: bold; white-space: nowrap; }
+        .tab button:hover { background-color: #ddd; }
+        .tab button.active { background-color: #fff; border-bottom: 2px solid #007BFF; color: #007BFF; }
+        .tabcontent { display: none; padding: 20px; border: 1px solid #ccc; border-top: none; background-color: #fff; border-radius: 0 0 5px 5px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; background-color: white; }
+        th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: center; }
+        th { background-color: #f8f9fa; font-size: 0.85em; color: #555; }
+        td { font-size: 0.88em; }
+        .input-row td { background-color: #e9ecef; }
+        input, select { width: 95%; padding: 5px; box-sizing: border-box; text-align: center; border: 1px solid #ccc; border-radius: 3px; font-size: 0.88em; }
+
+        .btn-add    { padding: 7px 14px; background-color: #28a745; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 3px; }
+        .btn-add:hover { background-color: #218838; }
+        .btn-delete { padding: 4px 9px; background-color: #dc3545; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
+        .btn-delete:hover { background-color: #c82333; }
+        .btn-refresh { padding: 7px 14px; background-color: #17a2b8; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 3px; }
+
+        .market-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 25px; }
+        .market-card { background: #fff; padding: 15px; border-radius: 8px; border: 1px solid #eee; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .market-card h5 { margin: 0 0 8px 0; color: #666; font-size: 0.85em; }
+        .market-card .val { font-size: 1.3em; font-weight: bold; color: #2d3436; }
+        .market-card .chg { font-size: 0.85em; margin-left: 6px; font-weight: bold; }
+        .up { color: #d63031; } .down { color: #0984e3; }
+
+        .balance-banner { background: #f0f7ff; border: 1px solid #cce0ff; border-radius: 6px; padding: 10px 16px; margin-bottom: 14px; font-size: 0.92em; display: flex; align-items: center; gap: 16px; }
+        .cash-card { display: flex; align-items: center; gap: 16px; margin-top: 10px; padding: 11px 16px; background: #f0f7ff; border: 1px solid #cce0ff; border-radius: 6px; font-size: 0.91em; flex-wrap: wrap; }
+
+        .chart-container { display: flex; justify-content: space-around; flex-wrap: wrap; padding: 15px; background-color: #fafafa; border-radius: 8px; border: 1px solid #eee; }
+        .chart-box { width: 45%; min-width: 280px; text-align: center; }
+        details { margin-top: 18px; }
+        details summary { font-size: 1.05em; font-weight: bold; color: #007BFF; cursor: pointer; padding: 10px; background-color: #f8f9fa; border-radius: 4px; border: 1px solid #ddd; }
+
+        .badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 0.8em; font-weight: bold; }
+        .badge-buy      { background:#d4edda; color:#155724; }
+        .badge-sell     { background:#f8d7da; color:#721c24; }
+        .badge-deposit  { background:#d1ecf1; color:#0c5460; }
+        .badge-dividend { background:#fff3cd; color:#856404; }
+        .badge-interest { background:#e2e3e5; color:#383d41; }
+        .badge-other    { background:#e2e3e5; color:#383d41; }
+        .last-row       { background: #fff9e6 !important; }
+
+        .bot-config-box { background: #ffffff; border: 1px solid #ddd; padding: 25px; border-radius: 8px; max-width: 800px; margin: 0 auto; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        .alert-form-bar { background: #f8f9fa; border: 1px solid #dee2e6; padding: 15px; border-radius: 6px; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; overflow-x: auto; }
+        .summary-banner { background: #eef2f5; padding: 10px 15px; border-radius: 6px; margin-bottom: 10px; display: flex; gap: 20px; font-size: 0.9em; align-items: center; flex-wrap: wrap; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h2>📈 ETF 포트폴리오 관리</h2>
+    <div style="display: flex; align-items: center; gap: 15px;">
+        <span style="font-size: 0.9em; opacity: 0.8;">관리자 인증됨</span>
+        <a href="{{ url_for('logout') }}" style="color: white; text-decoration: none; font-size: 0.85em; border: 1px solid white; padding: 5px 10px; border-radius: 4px;">로그아웃</a>
+    </div>
+</div>
+
+<div class="tab">
+    <button class="tablinks" onclick="openTab(event,'StatusTab')" id="defaultOpen">📊 현재 상태</button>
+    <button class="tablinks" onclick="openTab(event,'ISATab')">🏦 ISA</button>
+    <button class="tablinks" onclick="openTab(event,'IRPTab')">🏦 IRP</button>
+    <button class="tablinks" onclick="openTab(event,'PensionTab')">🏦 연금저축</button>
+    <button class="tablinks" onclick="openTab(event,'SettingTab')">⚙️ 설정</button>
+    <button class="tablinks" onclick="openTab(event,'BotTab')">🤖 알림 설정</button>
+</div>
+
+
+<div id="StatusTab" class="tabcontent">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+        <h3 style="margin:0;">📊 포트폴리오 요약</h3>
+        <form action="{{ url_for('refresh_prices') }}" method="POST" style="margin:0;">
+            <button type="submit" class="btn-refresh">🔄 실시간 정보 갱신</button>
+        </form>
+    </div>
+
+    <div class="market-grid">
+        {% for sym in ['USD','JPY','CNY'] %}
+        <div class="market-card">
+            <h5>{{ exchange[sym]['name'] }}</h5>
+            <div class="val">{{ exchange[sym]['value'] }}
+                {% if exchange[sym]['status'] == 'up' %}<span class="chg up">▲ {{ exchange[sym]['change'] }}</span>
+                {% elif exchange[sym]['status'] == 'down' %}<span class="chg down">▼ {{ exchange[sym]['change'] }}</span>{% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if not status or not status.get('통합') %}
+        <p>데이터가 없습니다. 거래 내역을 입력해주세요.</p>
+    {% else %}
+
+    <details id="chartDetails" style="margin-bottom:28px;">
+        <summary>📊 자산 배분 비중 차트 보기</summary>
+        <div class="chart-container" style="margin-top:15px;">
+            <div class="chart-box"><h5>[통합] 목표 비중</h5><div style="position:relative;height:250px;"><canvas id="targetChart"></canvas></div></div>
+            <div class="chart-box"><h5>[통합] 현재 비중</h5><div style="position:relative;height:250px;"><canvas id="currentChart"></canvas></div></div>
+        </div>
+    </details>
+
+    {% for acc_name in ['통합','ISA','IRP','연금저축'] %}
+        {% if status.get(acc_name) %}
+            {% set cash_item = status[acc_name] | selectattr('티커','equalto','CASH') | list | first %}
+            {% set etf_items = status[acc_name] | rejectattr('티커','equalto','CASH') | list %}
+            {% set stats = summary_stats.get(acc_name, {}) if summary_stats else {} %}
+
+            {% if acc_name == '통합' %}
+                <h4 style="margin-top:8px; color:#007BFF;">[통합] 계좌 상태</h4>
+            {% else %}
+                <details><summary>[{{ acc_name }}] 계좌 상세 보기</summary>
+            {% endif %}
+
+            <div class="summary-banner">
+                <div><span>총 입금액:</span> <strong>₩{{ "{:,.0f}".format(stats.deposit) if stats.deposit else 0 }}</strong></div>
+                <div><span>총 평가액:</span> <strong>₩{{ "{:,.0f}".format(stats.eval) if stats.eval else 0 }}</strong></div>
+                <div><span>누적 수익률:</span> 
+                    <strong style="color:{% if stats.roi and stats.roi > 0 %}red{% elif stats.roi and stats.roi < 0 %}blue{% else %}black{% endif %};">
+                        {{ stats.roi if stats.roi else 0 }}%
+                    </strong>
+                </div>
+                <div style="margin-left: auto; background: #fff; padding: 4px 10px; border-radius: 4px; border: 1px solid #ccc;">
+                    <span>⚖️ 리밸런싱 필요 비율 (통합 오차):</span> <strong style="color:#d35400;">{{ stats.turnover if stats.turnover else 0 }}%</strong>
+                </div>
+            </div>
+
+            <table style="margin-top:10px;">
+                <thead><tr>
+                    <th style="width:20%;">종목명</th>
+                    <th style="width:7%;">목표</th><th style="width:8%;">현재</th><th style="width:9%;">오차</th>
+                    <th style="width:7%;">보유</th><th style="width:10%;">평단가</th><th style="width:10%;">현재가</th>
+                    <th style="width:14%;">평가총액</th><th style="width:8%;">손익률</th>
+                </tr></thead>
+                <tbody>
+                {% for item in etf_items %}
+                <tr>
+                    <td style="text-align:left;font-size:0.85em;"><strong>{{ item['종목명'] }}</strong></td>
+                    <td>{{ item['목표비중(%)'] }}%</td>
+                    <td><strong>{{ item['현재비중(%)'] }}%</strong></td>
+                    <td style="color:{% if item['비중오차(%p)'] > 0 %}red{% elif item['비중오차(%p)'] < 0 %}blue{% else %}black{% endif %};">{{ item['비중오차(%p)'] }}%p</td>
+                    <td>{{ item['보유수량'] }}</td>
+                    <td>₩{{ "{:,.0f}".format(item['평단가']) }}</td>
+                    <td>₩{{ "{:,.0f}".format(item['현재가']) }}</td>
+                    <td>₩{{ "{:,.0f}".format(item['평가금액']) }}</td>
+                    <td style="color:{% if item['손익률(%)'] > 0 %}red{% elif item['손익률(%)'] < 0 %}blue{% else %}black{% endif %};"><strong>{{ item['손익률(%)'] }}%</strong></td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% if cash_item %}
+            <div class="cash-card">
+                <span style="font-weight:bold;color:#2c3e50;">💰 예수금</span>
+                <span style="font-size:1.1em;font-weight:bold;">₩{{ "{:,.0f}".format(cash_item['평가금액']) }}</span>
+            </div>
+            {% endif %}
+            {% if acc_name != '통합' %}</details>{% endif %}
+        {% endif %}
+    {% endfor %}
+    {% endif %}
+</div>
+
+
+{% macro ledger_tab(acc, tab_id) %}
+<div id="{{ tab_id }}" class="tabcontent">
+
+    <div class="balance-banner">
+        <span style="font-weight:bold;color:#2c3e50;">💰 현재 예수금</span>
+        <span style="font-size:1.15em;font-weight:bold;color:#2d3436;">₩{{ "{:,.0f}".format(cash_balances[acc]) }}</span>
+        <span style="color:#888;font-size:0.82em;">(원장 마지막 잔고 기준)</span>
+    </div>
+
+    <h4 style="margin:0 0 6px 0;color:#2c3e50;">➕ 거래 입력</h4>
+    <form action="{{ url_for('add_tx', account=acc) }}" method="POST">
+        <table>
+            <thead><tr>
+                <th style="width:9%;">유형</th>
+                <th style="width:19%;">티커</th>
+                <th style="width:8%;">수량</th>
+                <th style="width:9%;">단가</th>
+                <th style="width:12%;">금액(입출금/배당)</th>
+                <th style="width:30%;">메모</th>
+                <th style="width:7%;">입력</th>
+            </tr></thead>
+            <tbody>
+                <tr class="input-row">
+                    <td>
+                        <select name="tx_type" id="txtype_{{ acc }}" onchange="onTypeChange('{{ acc }}')">
+                            <option value="BUY">매수</option>
+                            <option value="SELL">매도</option>
+                            <option value="DEPOSIT">입금</option>
+                            <option value="DIVIDEND">분배금</option>
+                            <option value="INTEREST">이자</option>
+                            <option value="OTHER">기타</option>
+                        </select>
+                    </td>
+                    <td>
+                        <select name="ticker" id="ticker_{{ acc }}">
+                            <option value="">-- 선택 --</option>
+                            {% for _, row in settings_rows %}
+                                {% if row|length < 5 or row[4] == 'Y' %}
+                                    <option value="{{ row[0] }}">{{ row[0] }} {{ row[1] }}</option>
+                                {% endif %}
+                            {% endfor %}
+                        </select>
+                    </td>
+                    <td><input type="number" step="0.01" name="quantity" id="qty_{{ acc }}" placeholder="수량"></td>
+                    <td><input type="number" name="price" id="price_{{ acc }}" placeholder="단가"></td>
+                    <td><input type="number" name="cash_amount" id="ca_{{ acc }}" placeholder="금액" style="display:none;"></td>
+                    <td><input type="text" name="note" id="note_{{ acc }}" placeholder="메모 (선택)"></td>
+                    <td><button type="submit" class="btn-add">입력</button></td>
+                </tr>
+            </tbody>
+        </table>
+    </form>
+
+    <h4 style="margin:18px 0 6px 0;color:#2c3e50;">
+        📋 거래 내역
+        <span style="font-size:0.78em;color:#888;font-weight:normal;">최신순 · 🟡 마지막 행만 삭제 가능</span>
+    </h4>
+    <table>
+        <thead><tr>
+            <th style="width:13%;">일시</th>
+            <th style="width:7%;">유형</th>
+            <th style="width:8%;">티커</th>
+            <th style="width:18%;">종목명/메모</th>
+            <th style="width:7%;">수량</th>
+            <th style="width:9%;">단가</th>
+            <th style="width:11%;">현금변동</th>
+            <th style="width:12%;">잔고</th>
+            <th style="width:7%;">삭제</th>
+        </tr></thead>
+        <tbody>
+        {% for row in ledger_data[acc] %}
+            {% set bmap = {'매수':'buy','매도':'sell','입금':'deposit','분배금':'dividend','이자':'interest','기타':'other'} %}
+            <tr {% if row.is_last %}class="last-row"{% endif %}>
+                <td style="font-size:0.78em;color:#555;">{{ row.timestamp }}</td>
+                <td><span class="badge badge-{{ bmap.get(row.type_ko,'other') }}">{{ row.type_ko }}</span></td>
+                <td style="font-size:0.82em;">{{ row.ticker if row.ticker != '-' else '' }}</td>
+                <td style="text-align:left;font-size:0.84em;">{{ row.name }}</td>
+                <td>{{ "{:,.0f}".format(row.quantity|float) if row.quantity and row.quantity|float != 0 else '' }}</td>
+                <td>{{ "₩{:,.0f}".format(row.price|float) if row.price and row.price|float != 0 else '' }}</td>
+                <td style="font-weight:bold;color:{% if row.cash_delta and (row.cash_delta|float) >= 0 %}#155724{% else %}#721c24{% endif %};">
+                    {% if row.cash_delta and row.cash_delta != '0' %}{{ "{:+,.0f}".format(row.cash_delta|float) }}{% endif %}
+                </td>
+                <td style="font-weight:bold;">
+                    {% if row.balance_after %}₩{{ "{:,.0f}".format(row.balance_after|float) }}{% endif %}
+                </td>
+                <td>
+                    {% if row.is_last %}
+                    <form action="{{ url_for('delete_last', account=acc) }}" method="POST"
+                          onsubmit="return confirm('마지막 거래({{ row.timestamp }})를 삭제하시겠습니까?');">
+                        <button type="submit" class="btn-delete">삭제</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endmacro %}
+
+{{ ledger_tab('ISA',    'ISATab')    }}
+{{ ledger_tab('IRP',    'IRPTab')    }}
+{{ ledger_tab('연금저축', 'PensionTab') }}
+
+
+<div id="SettingTab" class="tabcontent">
+    <h3>⚙️ 종목 및 비중 설정</h3>
+    
+    <form action="{{ url_for('add_setting') }}" method="POST" style="margin-bottom: 25px;">
+        <table>
+            <thead><tr><th>티커</th><th>종목명</th><th>자산군</th><th>목표(%)</th><th>추가</th></tr></thead>
+            <tbody>
+                <tr class="input-row">
+                    <td><input type="text"   name="set_ticker"  placeholder="379800"          required></td>
+                    <td><input type="text"   name="set_name"    placeholder="KODEX 미국S&P500" required></td>
+                    <td>
+                        <select name="set_class">
+                            <option value="주식">주식</option>
+                            <option value="채권">채권</option>
+                            <option value="원자재">원자재</option>
+                            <option value="현금성">현금성</option>
+                        </select>
+                    </td>
+                    <td><input type="number" name="set_weight"  placeholder="25" step="0.1"   required></td>
+                    <td><button type="submit" class="btn-add">추가</button></td>
+                </tr>
+            </tbody>
+        </table>
+    </form>
+
+    <form action="{{ url_for('update_all_settings') }}" method="POST">
+        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 8px;">
+            <h4 style="margin:0; color:#2c3e50; font-size: 1.05em;">📋 등록된 종목 관리</h4>
+            <button type="submit" class="btn-refresh">💾 변경사항 일괄 저장</button>
+        </div>
+        <p style="margin-top: 0; font-size: 0.85em; color: #666;">※ 체크를 해제한 후 일괄 저장하면, 해당 종목은 포트폴리오 목표 비중 계산에서 제외됩니다.</p>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 8%;">사용</th>
+                    <th style="width: 15%;">티커</th>
+                    <th style="width: 32%;">종목명</th>
+                    <th style="width: 12%;">자산군</th>
+                    <th style="width: 18%;">목표(%)</th>
+                    <th style="width: 15%;">삭제</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row_idx, row in settings_rows %}
+                {% set is_active = (row[4] == 'Y') if row|length > 4 else True %}
+                <tr>
+                    <td>
+                        <input type="checkbox" name="active" value="{{ row[0] }}" {% if is_active %}checked{% endif %} style="width: 18px; height: 18px; cursor: pointer;">
+                    </td>
+                    <td>
+                        <strong>{{ row[0] }}</strong>
+                        <input type="hidden" name="ticker" value="{{ row[0] }}">
+                        <input type="hidden" name="name" value="{{ row[1] }}">
+                        <input type="hidden" name="class" value="{{ row[2] }}">
+                    </td>
+                    <td style="text-align:left;">{{ row[1] }}</td>
+                    <td>{{ row[2] }}</td>
+                    <td>
+                        <input type="number" name="weight" value="{{ row[3] }}" step="0.1" style="width: 60px;"> %
+                    </td>
+                    <td>
+                        <button type="submit" formaction="{{ url_for('delete_setting', row_idx=row_idx) }}" class="btn-delete" onclick="return confirm('삭제할까요?');">삭제</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </form>
+</div>
+
+
+<div id="BotTab" class="tabcontent">
+    <div class="bot-config-box">
+        <h3 style="margin-top:0; color:#2c3e50; display: flex; align-items: center; gap: 10px;">
+            <span>🤖 텔레그램 알림 봇 관리</span>
+        </h3>
+        {% if telegram_config.managed_by_env %}
+        <p style="color: #28a745; font-size: 0.9em; font-weight: bold;">✅ 현재 시스템 환경 변수(.env)로 보안 설정이 관리되고 있습니다.</p>
+        {% endif %}
+        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+        
+        <form action="{{ url_for('update_telegram') }}" method="POST">
+            <div style="margin-bottom: 20px;">
+                <label style="display: block; margin-bottom: 8px; font-weight: bold;">봇 토큰 (Bot Token)</label>
+                <input type="text" name="token" value="{{ telegram_config.token }}" placeholder="123456789:ABCDef..." 
+                       style="width: 100%; text-align: left; padding: 10px;" {% if telegram_config.managed_by_env %}readonly{% endif %}>
+            </div>
+            
+            <div style="margin-bottom: 20px;">
+                <label style="display: block; margin-bottom: 8px; font-weight: bold;">채팅 ID (Chat ID)</label>
+                <input type="text" name="chat_id" value="{{ telegram_config.chat_id }}" placeholder="987654321" 
+                       style="width: 100%; text-align: left; padding: 10px;" {% if telegram_config.managed_by_env %}readonly{% endif %}>
+            </div>
+
+            <div style="margin-bottom: 20px;">
+                <label style="display: block; margin-bottom: 8px; font-weight: bold;">감시 주기 (초 단위)</label>
+                <input type="number" name="interval" value="{{ telegram_config.interval }}" placeholder="3600" min="10" 
+                       style="width: 100%; text-align: left; padding: 10px;" {% if telegram_config.managed_by_env %}readonly{% endif %}>
+                <p style="margin: 5px 0 0 5px; font-size: 0.8em; color: #888;">※ 예: 1시간 = 3600, 10분 = 600 (너무 짧으면 네이버 금융에서 차단될 수 있습니다.)</p>
+            </div>
+            {% if not telegram_config.managed_by_env %}
+            <button type="submit" class="btn-add" style="background-color: #007BFF; width: 100%; padding: 12px; margin-bottom: 10px;">설정 저장</button>
+            {% endif %}
+        </form>
+        <form action="{{ url_for('test_telegram') }}" method="POST" style="flex: 1;">
+            <button type="submit" class="btn-refresh" style="background-color: #6c757d; width: 100%; padding: 12px;">테스트 메시지 전송</button>
+        </form>
+            </div>
+
+        <div style="margin-top: 40px; border-top: 2px solid #eee; padding-top: 20px;">
+            <h4 style="color:#2c3e50; margin-bottom: 12px;">📈 가격 변동 알림 추가</h4>
+            <form action="{{ url_for('add_alert') }}" method="POST" class="alert-form-bar">
+                <input type="hidden" name="alert_type" value="PRICE">
+                <select name="ticker" style="width: 180px;" required>
+                    <option value="">-- 종목 선택 --</option>
+                    {% for t, v in settings_data.items() %}
+                    <option value="{{ t }}">{{ v.name }}</option>
+                    {% endfor %}
+                </select>
+                <select name="ref_type" style="width: 140px;">
+                    <option value="AVG">평단가 대비</option>
+                    <option value="LAST">마지막구매가 대비</option>
+                    <option value="HIGH52">52주최고가 대비</option>
+                </select>
+                <input type="number" name="value" placeholder="값" style="width: 70px;" required>
+                <select name="condition" style="width: 130px;">
+                    <option value="UP_PCT">% ▲ 상승 시</option>
+                    <option value="DOWN_PCT">% ▼ 하락 시</option>
+                </select>
+                <button type="submit" class="btn-add">➕ 등록</button>
+            </form>
+
+            <h4 style="color:#2c3e50; margin-top: 25px; margin-bottom: 12px;">⚖️ 비중 오차 알림 추가</h4>
+            <form action="{{ url_for('add_alert') }}" method="POST" class="alert-form-bar" style="background-color: #f0f7ff; border-color: #cce0ff;">
+                <input type="hidden" name="alert_type" value="PORTFOLIO">
+                <select name="ref_type" style="width: 160px;" onchange="document.getElementById('port_ticker_select').style.display = (this.value=='ITEM_DEV'?'block':'none')">
+                    <option value="TURNOVER">전체비중 오차합</option>
+                    <option value="ITEM_DEV">개별종목 비중오차</option>
+                </select>
+                <select name="ticker" id="port_ticker_select" style="width: 180px; display: none;">
+                    <option value="">-- 모든 종목 --</option>
+                    {% for t, v in settings_data.items() %}
+                    <option value="{{ t }}">{{ v.name }}</option>
+                    {% endfor %}
+                </select>
+                <div style="display:flex; align-items:center; gap:5px;">
+                    <input type="number" step="0.1" name="value" placeholder="값" style="width: 70px;" required>
+                    <select name="condition" style="width: 150px;">
+                        <option value="OVER">%p(절대오차) 이상</option>
+                        <option value="REL_OVER">%(상대괴리율) 이상</option>
+                    </select>
+                    <span style="font-size:0.9em; color:#555;">괴리 시</span>
+                </div>
+                <button type="submit" class="btn-add" style="background-color: #6f42c1;">➕ 등록</button>
+            </form>
+            
+            <h4 style="color:#2c3e50; margin-top: 35px; margin-bottom: 10px;">📋 현재 활성화된 알림 목록</h4>
+            <table>
+                <thead>
+                    <tr>
+                        <th>구분</th>
+                        <th>대상</th>
+                        <th>조건</th>
+                        <th>값</th>
+                        <th>삭제</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for alert in alerts %}
+                    <tr>
+                        <td>{{ '가격' if alert.type == 'PRICE' else '비중' }}</td>
+                        <td style="text-align: left;">
+                            <strong>{{ settings_data[alert.ticker].name if alert.ticker in settings_data else '통합 포트폴리오' }}</strong>
+                        </td>
+                        <td style="text-align: left; font-size: 0.85em; color: #666;">
+                            {% if alert.ref_type == 'AVG' %}평단가 대비
+                            {% elif alert.ref_type == 'LAST' %}마지막구매가 대비
+                            {% elif alert.ref_type == 'HIGH52' %}52주최고가 대비
+                            {% elif alert.ref_type == 'TURNOVER' %}전체 비중오차
+                            {% else %}개별 비중오차{% endif %}
+                            
+                            {% if alert.condition == 'UP_PCT' %}이상 상승 시
+                            {% elif alert.condition == 'DOWN_PCT' %}이상 하락 시
+                            {% elif alert.condition == 'REL_OVER' %}상대 괴리율
+                            {% else %}이상 도달{% endif %}
+                        </td>
+                        <td>
+                            <strong style="color: #0366d6;">{{ alert.value }}{{ '%' if 'PCT' in alert.condition or alert.condition == 'REL_OVER' else '%p' }}</strong>
+                            {% if alert.target_price %}
+                            <div style="font-size: 0.78em; color: #888; margin-top: 2px;">(₩{{ "{:,.0f}".format(alert.target_price) }})</div>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <form action="{{ url_for('delete_alert', alert_id=alert.id) }}" method="POST">
+                                <button type="submit" class="btn-delete">🗑️</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <div style="margin-top: 20px;">
+                <form action="{{ url_for('check_rebalancing') }}" method="POST">
+                    <button type="submit" class="btn-refresh" style="background-color: #6f42c1; width: 100%; padding: 12px;">📊 현재 상태 즉시 브리핑 받기</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// ── 탭 전환 ─────────────────────────────────────────────────
+const TAB_PARAM = {
+    'StatusTab':'status', 'ISATab':'ISA', 'IRPTab':'IRP',
+    'PensionTab':'pension', 'SettingTab':'settings', 'BotTab':'bot'
+};
+const PARAM_TAB = Object.fromEntries(Object.entries(TAB_PARAM).map(([k,v])=>[v,k]));
+
+function openTab(evt, tabName) {
+    document.querySelectorAll('.tabcontent').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.tablinks').forEach(el => el.classList.remove('active'));
+    document.getElementById(tabName).style.display = 'block';
+    if (evt) evt.currentTarget.classList.add('active');
+    const url = new URL(window.location);
+    url.searchParams.set('tab', TAB_PARAM[tabName] || 'status');
+    window.history.replaceState({}, '', url);
+}
+
+window.addEventListener('load', function () {
+    const param = new URLSearchParams(window.location.search).get('tab') || 'status';
+    const tabId = PARAM_TAB[param] || 'StatusTab';
+    const btn   = document.querySelector(`.tablinks[onclick*="${tabId}"]`);
+    if (btn) btn.click(); else document.getElementById('defaultOpen').click();
+});
+
+// ── 거래 유형별 필드 토글 ────────────────────────────────────
+function onTypeChange(acc) {
+    const type     = document.getElementById('txtype_' + acc).value;
+    const ticker   = document.getElementById('ticker_' + acc);
+    const qty      = document.getElementById('qty_'    + acc);
+    const price    = document.getElementById('price_'  + acc);
+    const ca       = document.getElementById('ca_'     + acc);
+
+    const isEquity   = (type === 'BUY' || type === 'SELL');
+    const isDividend = (type === 'DIVIDEND');
+
+    ticker.style.display = (isEquity || isDividend) ? 'block' : 'none';
+    if (!isEquity && !isDividend) ticker.value = '';
+
+    qty.style.display   = isEquity ? 'block' : 'none';
+    price.style.display = isEquity ? 'block' : 'none';
+    if (!isEquity) { qty.value = ''; price.value = ''; }
+
+    ca.style.display = !isEquity ? 'block' : 'none';
+    if (isEquity) ca.value = '';
+
+    // 분배금: 메모에 ticker명 힌트
+    if (isDividend && ticker.value) {
+        document.getElementById('note_' + acc).placeholder = '분배금 메모';
+    }
+}
+
+// ── 차트 ────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function () {
+    const det = document.getElementById('chartDetails');
+    if (det) {
+        det.addEventListener('toggle', function (e) {
+            if (e.target.open) {
+                if (window.targetChartInst)  window.targetChartInst.resize();
+                if (window.currentChartInst) window.currentChartInst.resize();
+            }
+        });
+    }
+
+    const data = {{ status.get('통합', []) | tojson | safe }};
+    if (!data || data.length === 0) return;
+
+    const labels   = data.map(i => i['종목명']);
+    const targets  = data.map(i => i['목표비중(%)']);
+    const currents = data.map(i => i['현재비중(%)']);
+    const colors   = ['#3498db','#e74c3c','#f1c40f','#2ecc71','#9b59b6',
+                      '#e67e22','#95a5a6','#1abc9c','#e91e63','#00bcd4'];
+    const opts = { responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}} };
+
+    window.targetChartInst = new Chart(
+        document.getElementById('targetChart').getContext('2d'),
+        { type:'pie', data:{ labels, datasets:[{ data:targets,  backgroundColor:colors }] }, options:opts }
+    );
+    window.currentChartInst = new Chart(
+        document.getElementById('currentChart').getContext('2d'),
+        { type:'pie', data:{ labels, datasets:[{ data:currents, backgroundColor:colors }] }, options:opts }
+    );
+});
+</script>
+</body>
+</html>
