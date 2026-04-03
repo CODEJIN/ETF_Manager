@@ -72,6 +72,7 @@
     <button class="tablinks" onclick="openTab(event,'ISATab')">🏦 ISA</button>
     <button class="tablinks" onclick="openTab(event,'IRPTab')">🏦 IRP</button>
     <button class="tablinks" onclick="openTab(event,'PensionTab')">🏦 연금저축</button>
+    <button class="tablinks" onclick="openTab(event,'RebalanceTab')">⚖️ 리밸런싱 계산기</button>
     <button class="tablinks" onclick="openTab(event,'SettingTab')">⚙️ 설정</button>
     <button class="tablinks" onclick="openTab(event,'BotTab')">🤖 알림 설정</button>
 </div>
@@ -80,9 +81,15 @@
 <div id="StatusTab" class="tabcontent">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
         <h3 style="margin:0;">📊 포트폴리오 요약</h3>
-        <form action="{{ url_for('refresh_prices') }}" method="POST" style="margin:0;">
-            <button type="submit" class="btn-refresh">🔄 실시간 정보 갱신</button>
-        </form>
+        <div style="text-align: right;">
+            <form action="{{ url_for('refresh_prices') }}" method="POST" style="margin-bottom: 5px;">
+                <button type="submit" class="btn-refresh">🔄 실시간 정보 갱신</button>
+            </form>
+            <div style="font-size: 0.78em; color: #666; display: flex; gap: 12px; justify-content: flex-end; font-family: 'Consolas', monospace;">
+                <span>🕒 <span style="color:#888;">최근:</span> <strong>{{ last_updated }}</strong></span>
+                <span>⏳ <span style="color:#888;">다음:</span> <strong>{{ next_update }}</strong></span>
+            </div>
+        </div>
     </div>
 
     <div class="market-grid">
@@ -274,9 +281,91 @@
 {{ ledger_tab('IRP',    'IRPTab')    }}
 {{ ledger_tab('연금저축', 'PensionTab') }}
 
+<div id="RebalanceTab" class="tabcontent">
+    <h3 style="margin-top:0;">⚖️ 리밸런싱 추천 (추가 매수 가이드)</h3>
+    <p style="font-size: 0.88em; color: #666; margin-bottom: 20px;">
+        현재 보유 중인 <strong>통합 예수금</strong>을 활용하여 각 종목의 목표 비중에 도달하기 위해 필요한 수량을 계산한 결과입니다.<br>
+        (※ 매도 없이 매수만으로 오차를 줄이는 방식입니다.)
+    </p>
+
+    <div class="summary-banner" style="background: #eef2f5; border: 1px solid #dee2e6; margin-bottom: 25px;">
+        <div><span>사용 가능한 총 예수금:</span> <strong>₩{{ "{:,.0f}".format(cash_balances.get('통합', 0)|default(0)) }}</strong></div>
+        <div><span>추천 매수 총액:</span> <strong style="color:#d35400;">₩{{ "{:,.0f}".format(total_buy_amt|default(0)) }}</strong></div>
+        <div style="margin-left: auto;">
+            <span>매수 후 예상 잔액:</span> <strong>₩{{ "{:,.0f}".format((cash_balances.get('통합', 0)|default(0)) - (total_buy_amt|default(0))) }}</strong>
+        </div>
+    </div>
+
+    {% if rebalance_by_account %}
+        {% for acc, data in rebalance_by_account.items() %}
+        <div style="margin-bottom: 30px; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
+            <div style="background: #f8f9fa; padding: 10px 15px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center;">
+                <h4 style="margin:0; color:#2c3e50;">🏦 {{ acc }} 계좌 추천</h4>
+                <span style="font-size: 0.85em; color: #666;">가용 예수금: ₩{{ "{:,.0f}".format(data.cash) }}</span>
+            </div>
+            <table style="margin-top:0; border:none;">
+                <thead>
+                    <tr style="background:#fff;">
+                        <th style="width:30%; border-left:none;">종목명</th>
+                        <th style="width:20%;">현재가</th>
+                        <th style="width:20%;">추천 매수 수량</th>
+                        <th style="width:30%; border-right:none;">예상 매수 금액</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in data['items'] %}
+                    <tr>
+                        <td style="text-align:left; border-left:none;"><strong>{{ item.name }}</strong> <small style="color:#888;">{{ item.ticker }}</small></td>
+                        <td>₩{{ "{:,.0f}".format(item.price) }}</td>
+                        <td style="background-color: #e6fffa; font-weight: bold; color: #2c3e50;">
+                            {{ item.qty }}주
+                        </td>
+                        <td style="font-weight:bold; border-right:none;">₩{{ "{:,.0f}".format(item.amt) }}</td>
+                    </tr>
+                    {% endfor %}
+                    {% if not data['items'] %}
+                    <tr>
+                        <td colspan="4" style="padding: 20px; color: #888;">이 계좌는 추가 매수 추천 내역이 없습니다.</td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+                <tfoot>
+                    <tr style="background: #fdfdfe;">
+                        <td colspan="3" style="text-align:right; font-weight:bold; border-left:none;">계좌 내 매수 소계:</td>
+                        <td style="font-weight:bold; color:#d35400; border-right:none;">₩{{ "{:,.0f}".format(data.total_buy) }}</td>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+        {% endfor %}
+    <p style="margin-top: 15px; font-size: 0.82em; color: #888;">
+        ※ '추천 매수 수량'은 소수점을 버림(Floor) 처리하여 보유한 예수금을 초과하지 않도록 계산되었습니다.
+    </p>
+    {% else %}
+    <div style="text-align: center; padding: 40px; color: #888;">
+        비중이 부족한 종목이 없거나, 매수 가능한 예수금이 부족합니다.
+    </div>
+    {% endif %}
+</div>
+
 
 <div id="SettingTab" class="tabcontent">
-    <h3>⚙️ 종목 및 비중 설정</h3>
+    <h3 style="margin-top:0;">⚙️ 시스템 및 포트폴리오 설정</h3>
+
+    <div style="background: #f8f9fa; border: 1px solid #dee2e6; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
+        <h4 style="margin-top:0; color:#2c3e50;">⏱️ 정보 업데이트 주기 설정</h4>
+        <form action="{{ url_for('update_global_config') }}" method="POST" style="display: flex; align-items: flex-end; gap: 15px;">
+            <div style="flex: 1;">
+                <label style="display: block; margin-bottom: 5px; font-size: 0.85em; color: #666;">감시 및 가격 캐시 유지 주기 (초 단위)</label>
+                <input type="number" name="interval" value="{{ telegram_config.interval }}" placeholder="3600" min="10" 
+                       style="width: 100%; text-align: left; padding: 8px;" {% if telegram_config.managed_by_env %}readonly{% endif %}>
+            </div>
+            <button type="submit" class="btn-refresh" style="height: 38px; padding: 0 20px;">저장</button>
+        </form>
+        <p style="margin: 8px 0 0 0; font-size: 0.8em; color: #888;">
+            ※ 이 설정은 <strong>텔레그램 알림 감시 주기</strong>와 <strong>웹 화면 정보의 신선도(캐시)</strong> 모두에 적용됩니다.
+        </p>
+    </div>
     
     <form action="{{ url_for('add_setting') }}" method="POST" style="margin-bottom: 25px;">
         <table>
@@ -368,13 +457,6 @@
                 <label style="display: block; margin-bottom: 8px; font-weight: bold;">채팅 ID (Chat ID)</label>
                 <input type="text" name="chat_id" value="{{ telegram_config.chat_id }}" placeholder="987654321" 
                        style="width: 100%; text-align: left; padding: 10px;" {% if telegram_config.managed_by_env %}readonly{% endif %}>
-            </div>
-
-            <div style="margin-bottom: 20px;">
-                <label style="display: block; margin-bottom: 8px; font-weight: bold;">감시 주기 (초 단위)</label>
-                <input type="number" name="interval" value="{{ telegram_config.interval }}" placeholder="3600" min="10" 
-                       style="width: 100%; text-align: left; padding: 10px;" {% if telegram_config.managed_by_env %}readonly{% endif %}>
-                <p style="margin: 5px 0 0 5px; font-size: 0.8em; color: #888;">※ 예: 1시간 = 3600, 10분 = 600 (너무 짧으면 네이버 금융에서 차단될 수 있습니다.)</p>
             </div>
             {% if not telegram_config.managed_by_env %}
             <button type="submit" class="btn-add" style="background-color: #007BFF; width: 100%; padding: 12px; margin-bottom: 10px;">설정 저장</button>
@@ -491,7 +573,8 @@
 // ── 탭 전환 ─────────────────────────────────────────────────
 const TAB_PARAM = {
     'StatusTab':'status', 'ISATab':'ISA', 'IRPTab':'IRP',
-    'PensionTab':'pension', 'SettingTab':'settings', 'BotTab':'bot'
+    'PensionTab':'pension', 'RebalanceTab':'rebalance',
+    'SettingTab':'settings', 'BotTab':'bot'
 };
 const PARAM_TAB = Object.fromEntries(Object.entries(TAB_PARAM).map(([k,v])=>[v,k]));
 

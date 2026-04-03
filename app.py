@@ -49,8 +49,14 @@ price_cache = {}
 # ── 환율 크롤링 ──────────────────────────────────────────────
 def get_exchange_rates():
     now = datetime.now()
+    config = get_telegram_config()
+    try:
+        interval_sec = int(config.get('interval', 600))
+    except:
+        interval_sec = 600
+
     if 'EXCHANGE_RATES' in price_cache:
-        if now - price_cache['EXCHANGE_RATES']['time'] < timedelta(minutes=10):
+        if now - price_cache['EXCHANGE_RATES']['time'] < timedelta(seconds=interval_sec):
             return price_cache['EXCHANGE_RATES']['data']
 
     rates = {
@@ -90,8 +96,14 @@ def get_exchange_rates():
 # ── 현재가 크롤링 ────────────────────────────────────────────
 def get_current_price(ticker):
     now = datetime.now()
+    config = get_telegram_config()
+    try:
+        interval_sec = int(config.get('interval', 300))
+    except:
+        interval_sec = 300
+
     if ticker in price_cache:
-        if now - price_cache[ticker]['time'] < timedelta(minutes=5):
+        if now - price_cache[ticker]['time'] < timedelta(seconds=interval_sec):
             return price_cache[ticker]['price']
     try:
         # 네이버 금융 실시간 시세 JSON 엔드포인트 (더 가볍고 빠름)
@@ -634,6 +646,18 @@ def index():
     portfolio_status = get_portfolio_status()
     exchange_data    = get_exchange_rates()
 
+    # ── 정보 갱신 시간 계산 ──
+    update_times = [v['time'] for v in price_cache.values() if isinstance(v, dict) and 'time' in v]
+    last_updated_dt = max(update_times) if update_times else None
+    
+    try:
+        interval_sec = int(telegram_config.get('interval', 3600))
+    except:
+        interval_sec = 3600
+        
+    last_updated_str = last_updated_dt.strftime('%H:%M:%S') if last_updated_dt else "-"
+    next_update_str = (last_updated_dt + timedelta(seconds=interval_sec)).strftime('%H:%M:%S') if last_updated_dt else "즉시"
+
     # 알림 목록에 표시할 목표 가격 계산
     for alert in alerts:
         if alert.get('type') == 'PRICE':
@@ -657,7 +681,55 @@ def index():
                 except: pass
 
     cash_balances    = {acc: get_cash_balance(acc) for acc in ACCOUNTS}
+    cash_balances['통합'] = sum(cash_balances.values())
     summary_stats    = get_portfolio_summary_stats(portfolio_status)
+
+    # ── 리밸런싱 추천 계산 (통합 계좌 기준) ──
+    # 모든 계좌를 미리 초기화하여 추천 내역이 없어도 표시되도록 함
+    rebalance_by_account = {acc: {'items': [], 'total_buy': 0, 'cash': cash_balances.get(acc, 0)} for acc in ACCOUNTS}
+    total_buy_amt_all = 0
+    t_status = portfolio_status.get('통합', [])
+    t_val = sum(item['평가금액'] for item in t_status) if t_status else 0
+
+    if t_val > 0:
+        underweight_items = []
+        total_positive_gap = 0
+        
+        # 1. 전역적으로 비중이 부족한 종목과 총 부족액 계산
+        for item in t_status:
+            if item['티커'] == 'CASH' or item['현재가'] <= 0:
+                continue
+            target_amt = t_val * (item['목표비중(%)'] / 100)
+            gap = target_amt - item['평가금액']
+            if gap > 0:
+                underweight_items.append({'ticker': item['티커'], 'name': item['종목명'], 'price': item['현재가'], 'gap': gap})
+                total_positive_gap += gap
+
+        # 2. 각 계좌별로 가용 예수금을 부족분 비율에 따라 배분
+        if total_positive_gap > 0:
+            for acc in ACCOUNTS:
+                acc_cash = rebalance_by_account[acc]['cash']
+                if acc_cash <= 0:
+                    continue
+                
+                acc_recs = []
+                acc_total_buy = 0
+                for info in underweight_items:
+                    # 이 계좌의 예수금을 전체 부족분 중 해당 종목이 차지하는 비율만큼 할당
+                    share_of_cash = acc_cash * (info['gap'] / total_positive_gap)
+                    qty = int(share_of_cash // info['price'])
+                    
+                    if qty > 0:
+                        amt = qty * info['price']
+                        acc_recs.append({
+                            'ticker': info['ticker'], 'name': info['name'],
+                            'price': info['price'], 'qty': qty, 'amt': amt
+                        })
+                        acc_total_buy += amt
+                
+                rebalance_by_account[acc]['items'] = acc_recs
+                rebalance_by_account[acc]['total_buy'] = acc_total_buy
+                total_buy_amt_all += acc_total_buy
 
     return render_template('index.html',
                            ledger_data=ledger_data,
@@ -669,6 +741,10 @@ def index():
                            exchange=exchange_data,
                            telegram_config=telegram_config,
                            alerts=alerts,
+                           rebalance_by_account=rebalance_by_account,
+                           total_buy_amt=total_buy_amt_all,
+                           last_updated=last_updated_str,
+                           next_update=next_update_str,
                            accounts=ACCOUNTS,
                            type_ko=TYPE_KO)
 
@@ -785,12 +861,23 @@ def update_all_settings():
 
 @app.route('/update_telegram', methods=['POST'])
 def update_telegram():
+    config = get_telegram_config()
     token = request.form.get('token', '').strip()
     chat_id = request.form.get('chat_id', '').strip()
-    interval = request.form.get('interval', '3600').strip()
-    enabled = 'Y' if request.form.get('enabled') == 'on' else 'N'
-    save_telegram_config(token, chat_id, enabled, interval)
+    # interval과 enabled는 기존 설정을 유지
+    save_telegram_config(token, chat_id, config['enabled'], config['interval'])
     return redirect(url_for('index') + '?tab=bot')
+
+@app.route('/update_global_config', methods=['POST'])
+def update_global_config():
+    """시스템 전반의 감시 및 캐시 주기를 업데이트합니다."""
+    interval = request.form.get('interval', '3600').strip()
+    config = get_telegram_config()
+    # 봇 토큰과 채팅 ID는 유지하고 주기만 업데이트
+    save_telegram_config(config['token'], config['chat_id'], config['enabled'], interval)
+    
+    flash(f"시스템 감시 및 정보 갱신 주기가 {interval}초로 변경되었습니다.")
+    return redirect(url_for('index') + '?tab=settings')
 
 @app.route('/add_alert', methods=['POST'])
 def add_alert():
