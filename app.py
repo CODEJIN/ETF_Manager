@@ -29,6 +29,7 @@ LEDGER_FILES = {
 SETTINGS_FILE = 'portfolio_settings.tsv'
 TELEGRAM_FILE = 'telegram_config.tsv'
 ALERT_FILE    = 'alert_settings.tsv'
+HISTORY_FILE  = 'portfolio_history.tsv'
 ACCOUNTS      = ['ISA', 'IRP', '연금저축']
 
 TSV_HEADER = ['timestamp', 'type', 'ticker', 'quantity', 'price',
@@ -94,6 +95,29 @@ def get_exchange_rates():
 
 
 # ── 현재가 크롤링 ────────────────────────────────────────────
+def _fetch_52week(ticker):
+    """네이버 금융 종목 페이지에서 52주 최고/최저가를 스크래핑합니다."""
+    try:
+        url = f"https://finance.naver.com/item/main.naver?code={ticker}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            for th in soup.find_all('th'):
+                if '52주' in th.get_text(strip=True):
+                    td = th.find_next_sibling('td')
+                    if td:
+                        # 형식: "223,000l53,700" ('l'로 최고/최저 구분)
+                        parts = td.get_text(strip=True).replace(',', '').split('l')
+                        if len(parts) == 2:
+                            try:
+                                return int(float(parts[0])), int(float(parts[1]))
+                            except:
+                                pass
+    except Exception as e:
+        print(f'❌ [52주 {ticker}] {e}')
+    return 0, 0
+
+
 def get_current_price(ticker):
     now = datetime.now()
     config = get_telegram_config()
@@ -105,25 +129,40 @@ def get_current_price(ticker):
     if ticker in price_cache:
         if now - price_cache[ticker]['time'] < timedelta(seconds=interval_sec):
             return price_cache[ticker]['price']
+
+    def safe_int(val):
+        try:
+            return int(float(str(val).replace(',', '')))
+        except (ValueError, TypeError):
+            return 0
+
     try:
-        # 네이버 금융 실시간 시세 JSON 엔드포인트 (더 가볍고 빠름)
+        # polling API: resultCode 확인 후 중첩 구조에서 데이터 추출
         url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{ticker}"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-        
+
         if res.status_code == 200:
-            data_json = res.json()
-            item = data_json.get('result', {}).get('areas', [{}])[0].get('datas', [{}])[0]
-            
-            price = int(item.get('nv', 0)) # 현재가
-            if price > 0:
-                cache_data = {
-                    'price': price,
-                    'high52': int(item.get('h52', 0)), # 52주 최고가
-                    'low52':  int(item.get('l52', 0)), # 52주 최저가
-                    'time': now
-                }
-                price_cache[ticker] = cache_data
-                return price
+            data = res.json()
+            if data.get('resultCode') == 'success':
+                item = data.get('result', {}).get('areas', [{}])[0].get('datas', [{}])[0]
+                price = safe_int(item.get('nv', 0))
+                if price > 0:
+                    old_data = price_cache.get(ticker, {})
+                    session_high = max(price, old_data.get('session_high', 0))
+
+                    # 52주 고/저가: 현재가와 동일 주기로 갱신, 실패 시 이전 캐시 유지
+                    high52, low52 = _fetch_52week(ticker)
+                    high52 = high52 or old_data.get('high52', 0)
+                    low52  = low52  or old_data.get('low52',  0)
+
+                    price_cache[ticker] = {
+                        'price':        price,
+                        'high52':       high52,
+                        'low52':        low52,
+                        'session_high': session_high,
+                        'time':         now,
+                    }
+                    return price
     except Exception as e:
         print(f'❌ [{ticker}] {e}')
     return price_cache.get(ticker, {}).get('price', 0)
@@ -200,21 +239,21 @@ def read_settings_rows():
         return []
     with open(SETTINGS_FILE, encoding='utf-8-sig') as f:
         rows = list(csv.reader(f, delimiter='\t'))
-    
+
     parsed = []
     for i in range(1, len(rows)):
         if len(rows[i]) >= 4:
-            # 5번째 컬럼(드롭다운 표시 여부)이 없으면 기본값 'Y'
             show_flag = rows[i][4].strip() if len(rows[i]) >= 5 else 'Y'
-            row_data = rows[i][:4] + [show_flag]
+            currency  = rows[i][5].strip() if len(rows[i]) >= 6 else 'KRW'
+            row_data  = rows[i][:4] + [show_flag, currency]
             parsed.append((i, row_data))
-            
+
     # 정렬: 표시('Y') 우선, 그 다음 티커 오름차순
     return sorted(parsed, key=lambda x: (0 if x[1][4] == 'Y' else 1, x[1][0]))
 
 
 def get_portfolio_settings():
-    """설정을 {ticker: {name, class, weight, is_active}} dict 로 반환합니다."""
+    """설정을 {ticker: {name, class, weight, is_active, currency}} dict 로 반환합니다."""
     settings = {}
     for _, row in read_settings_rows():
         ticker = str(row[0]).strip()
@@ -224,15 +263,16 @@ def get_portfolio_settings():
             weight = float(str(row[3]).strip().replace('%', ''))
         except ValueError:
             weight = 0.0
-            
-        # 5번째 열이 있으면 활성화 상태를 읽고, 없으면 기본값 True(Y)
+
         is_active = (str(row[4]).strip() == 'Y') if len(row) > 4 else True
-        
+        currency  = str(row[5]).strip() if len(row) > 5 else 'KRW'
+
         settings[ticker] = {
-            'name':   str(row[1]).strip(),
-            'class':  str(row[2]).strip(),
-            'weight': weight,
+            'name':      str(row[1]).strip(),
+            'class':     str(row[2]).strip(),
+            'weight':    weight,
             'is_active': is_active,
+            'currency':  currency,
         }
     return settings
 
@@ -274,7 +314,8 @@ def get_telegram_config():
         }
 
     # 환경 변수가 없으면 TSV 파일 확인 (하위 호환성)
-    default = {'token': '', 'chat_id': '', 'enabled': 'N', 'interval': '3600'}
+    default = {'token': '', 'chat_id': '', 'enabled': 'N', 'interval': '3600',
+               'warn_threshold': '3', 'danger_threshold': '5'}
     if not os.path.exists(TELEGRAM_FILE):
         return default
     with open(TELEGRAM_FILE, encoding='utf-8') as f:
@@ -282,7 +323,9 @@ def get_telegram_config():
         rows = list(reader)
         if not rows: return default
         res = rows[0]
-        if 'interval' not in res: res['interval'] = '3600'
+        if 'interval'         not in res: res['interval']         = '3600'
+        if 'warn_threshold'   not in res: res['warn_threshold']   = '3'
+        if 'danger_threshold' not in res: res['danger_threshold'] = '5'
         return res
 
 def send_telegram_notification(message):
@@ -304,11 +347,17 @@ def send_telegram_notification(message):
         print(f"❌ [텔레그램] 전송 실패: {e}")
         return False
 
-def save_telegram_config(token, chat_id, enabled, interval):
+def save_telegram_config(token, chat_id, enabled, interval, warn_threshold=None, danger_threshold=None):
+    config = get_telegram_config()
+    if warn_threshold   is None: warn_threshold   = config.get('warn_threshold',   '3')
+    if danger_threshold is None: danger_threshold = config.get('danger_threshold', '5')
+    fieldnames = ['token', 'chat_id', 'enabled', 'interval', 'warn_threshold', 'danger_threshold']
     with open(TELEGRAM_FILE, 'w', encoding='utf-8', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=['token', 'chat_id', 'enabled', 'interval'], delimiter='\t')
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter='\t')
         w.writeheader()
-        w.writerow({'token': token, 'chat_id': chat_id, 'enabled': enabled, 'interval': interval})
+        w.writerow({'token': token, 'chat_id': chat_id, 'enabled': enabled,
+                    'interval': interval, 'warn_threshold': warn_threshold,
+                    'danger_threshold': danger_threshold})
 
 def update_alert_triggered(alert_id):
     """알림 발송 시각을 기록하여 중복 발송을 방지합니다."""
@@ -360,17 +409,66 @@ def get_last_purchase_price(ticker):
                 break # 해당 계좌의 가장 최신 기록을 찾았으므로 다음 계좌로
     return last_buy['price'] if last_buy else 0
 
+def get_last_sale_price(ticker):
+    """가장 최근 매도 가격을 찾습니다."""
+    last_sell = None
+    for acc in ACCOUNTS:
+        rows = read_ledger(acc)
+        for r in reversed(rows):
+            if r.get('ticker') == ticker and r.get('type') == 'SELL':
+                current_time = r.get('timestamp', '')
+                if not last_sell or current_time > last_sell['time']:
+                    last_sell = {'price': float(r.get('price', 0)), 'time': current_time}
+                break
+    return last_sell['price'] if last_sell else 0
+
+def save_portfolio_snapshot(eval_total, deposit_total):
+    """총 평가액·입금액을 기록합니다. 최소 1시간 간격으로 저장합니다."""
+    if eval_total <= 0:
+        return
+    now = datetime.now()
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, encoding='utf-8') as f:
+            rows = list(csv.DictReader(f, delimiter='\t'))
+        if rows:
+            try:
+                last_ts = datetime.strptime(rows[-1]['timestamp'], '%Y-%m-%d %H:%M:%S')
+                if (now - last_ts).total_seconds() < 3600:
+                    return
+            except Exception:
+                pass
+    write_header = not os.path.exists(HISTORY_FILE)
+    with open(HISTORY_FILE, 'a', encoding='utf-8', newline='') as f:
+        w = csv.writer(f, delimiter='\t')
+        if write_header:
+            w.writerow(['timestamp', 'eval', 'deposit'])
+        w.writerow([now.strftime('%Y-%m-%d %H:%M:%S'), round(eval_total), round(deposit_total)])
+
+
+def get_portfolio_history():
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    with open(HISTORY_FILE, encoding='utf-8') as f:
+        return list(csv.DictReader(f, delimiter='\t'))
+
+
 def background_alert_worker():
     """주기적으로 조건을 체크하여 알림을 보냅니다."""
     print("🚀 알림 감시 워커 시작")
     while True:
         try:
             config = get_telegram_config()
+
+            # 텔레그램 활성화 여부와 무관하게 항상 포트폴리오 스냅샷 저장
+            status      = get_portfolio_status()
+            summary_all = get_portfolio_summary_stats(status)
+            total_s     = summary_all.get('통합', {})
+            save_portfolio_snapshot(total_s.get('eval', 0), total_s.get('deposit', 0))
+
             if config.get('enabled') == 'Y' and config.get('token'):
                 alerts = get_alert_settings()
-                status = get_portfolio_status()
                 total_status = status.get('통합', [])
-                summary = get_portfolio_summary_stats(status).get('통합', {})
+                summary = total_s
                 
                 for alert in alerts:
                     # 중복 알림 방지 (최근 6시간 내 발송 여부 체크)
@@ -397,9 +495,22 @@ def background_alert_worker():
                         elif alert['ref_type'] == 'LAST':
                             ref_val = get_last_purchase_price(ticker)
                             ref_name = "마지막 구매가"
+                        elif alert['ref_type'] == 'LAST_SELL':
+                            ref_val = get_last_sale_price(ticker)
+                            ref_name = "마지막 판매가"
                         elif alert['ref_type'] == 'HIGH52':
                             ref_val = price_cache.get(ticker, {}).get('high52', 0)
                             ref_name = "52주 최고가"
+                        elif alert['ref_type'] == 'LOW52':
+                            ref_val = price_cache.get(ticker, {}).get('low52', 0)
+                            ref_name = "52주 최저가"
+                        elif alert['ref_type'] == 'SESSION_HIGH':
+                            ref_val = price_cache.get(ticker, {}).get('session_high', 0)
+                            ref_name = "최근 고점"
+                        elif alert['ref_type'] == 'ROI':
+                            item = next((i for i in total_status if i['티커'] == ticker), None)
+                            ref_val = item['평단가'] if item else 0
+                            ref_name = "평단가 수익률"
                         elif alert['ref_type'] == 'FIXED':
                             ref_val = float(alert['value'])
                             ref_name = "지정가"
@@ -407,14 +518,24 @@ def background_alert_worker():
                         if ref_val <= 0: continue
 
                         # 조건 비교
-                        if alert['condition'] == 'UP_PCT':
+                        cur_roi = round(((cur_price / ref_val) - 1) * 100, 2) if alert['ref_type'] in ['ROI', 'AVG'] else 0
+                        if alert['ref_type'] == 'ROI':
+                            # ROI 모드는 +5%, +15% 등 목표 지점을 직접 계산
                             threshold = ref_val * (1 + float(alert['value'])/100)
-                            if cur_price >= threshold:
-                                msg = f"🔔 <b>[가격 알림]</b> {ticker}\n현재가({cur_price:,}원)가 {ref_name} 대비 {alert['value']}% 이상 상승했습니다."
-                        elif alert['condition'] == 'DOWN_PCT':
-                            threshold = ref_val * (1 - float(alert['value'])/100)
-                            if cur_price <= threshold:
-                                msg = f"🔔 <b>[가격 알림]</b> {ticker}\n현재가({cur_price:,}원)가 {ref_name} 대비 {alert['value']}% 이상 하락했습니다."
+                            if alert['condition'] == 'UP_PCT' and cur_price >= threshold:
+                                msg = f"🔔 <b>[수익률 도달]</b> {ticker}\n현재가: {cur_price:,}원 (ROI: {cur_roi}%)\n목표: 평단가 대비 <b>+{alert['value']}%</b> 지점 상향 돌파"
+                            elif alert['condition'] == 'DOWN_PCT' and cur_price <= threshold:
+                                msg = f"⚠️ <b>[수익률 이탈]</b> {ticker}\n현재가: {cur_price:,}원 (ROI: {cur_roi}%)\n목표: 평단가 대비 <b>+{alert['value']}%</b> 지점 하향 돌파"
+                        else:
+                            # 일반 PCT 모드 (기준가 대비 변동폭)
+                            if alert['condition'] == 'UP_PCT':
+                                threshold = ref_val * (1 + float(alert['value'])/100)
+                                if cur_price >= threshold:
+                                    msg = f"🔔 <b>[가격 알림]</b> {ticker}\n현재가({cur_price:,}원)가 {ref_name} 대비 {alert['value']}% 상승했습니다."
+                            elif alert['condition'] == 'DOWN_PCT':
+                                threshold = ref_val * (1 - float(alert['value'])/100)
+                                if cur_price <= threshold:
+                                    msg = f"⚠️ <b>[가격 알림]</b> {ticker}\n현재가({cur_price:,}원)가 {ref_name} 대비 {alert['value']}% 하락했습니다."
 
                     # 2. 비중 알림 체크
                     elif alert['type'] == 'PORTFOLIO':
@@ -458,30 +579,176 @@ def background_alert_worker():
         except Exception as e:
             print(f"❌ [워커 오류] {e}")
 
+def calc_dollar_exposure(portfolio_status, settings_data, exchange_rates):
+    """USD 자산의 평가금액 비율과 환율 민감도를 계산합니다."""
+    items      = portfolio_status.get('통합', [])
+    total_eval = sum(i['평가금액'] for i in items)
+    if total_eval <= 0:
+        return None
+    usd_eval = sum(
+        i['평가금액'] for i in items
+        if settings_data.get(i['티커'], {}).get('currency', 'KRW') == 'USD'
+    )
+    usd_pct = round(usd_eval / total_eval * 100, 1)
+    try:
+        usd_rate = float(str(exchange_rates.get('USD', {}).get('value', '0')).replace(',', ''))
+    except Exception:
+        usd_rate = 0
+    sensitivity = round(usd_eval * 0.01)  # 환율 1% 변동 시 평가액 영향
+    return {
+        'usd_pct':     usd_pct,
+        'usd_eval':    round(usd_eval),
+        'total_eval':  round(total_eval),
+        'sensitivity': sensitivity,
+        'usd_rate':    usd_rate,
+    }
+
+
+def calc_period_pnl(history):
+    """히스토리 TSV를 기반으로 월별/연도별 손익을 계산합니다.
+    pnl = (평가액 변동) - (입금액 변동)  → 신규 입금 효과를 제거한 실제 운용 손익
+    """
+    from collections import defaultdict
+
+    if len(history) < 2:
+        return {'monthly': [], 'yearly': []}
+
+    monthly_rows = defaultdict(list)
+    yearly_rows  = defaultdict(list)
+    for row in history:
+        try:
+            ts  = str(row.get('timestamp', ''))
+            ym  = ts[:7]   # 'YYYY-MM'
+            yr  = ts[:4]   # 'YYYY'
+            ev  = int(row['eval'])
+            dep = int(row['deposit'])
+            monthly_rows[ym].append({'eval': ev, 'deposit': dep})
+            yearly_rows[yr].append({'eval': ev, 'deposit': dep})
+        except Exception:
+            continue
+
+    def compute(groups, limit=None):
+        result = []
+        for period, rows in sorted(groups.items()):
+            first = rows[0]
+            last  = rows[-1]
+            pnl   = (last['eval'] - first['eval']) - (last['deposit'] - first['deposit'])
+            roi   = round(pnl / first['eval'] * 100, 2) if first['eval'] > 0 else 0
+            result.append({'period': period, 'pnl': round(pnl), 'roi': roi,
+                           'eval_end': last['eval']})
+        return result[-limit:] if limit else result
+
+    return {'monthly': compute(monthly_rows, limit=12), 'yearly': compute(yearly_rows)}
+
+
+def get_rebalance_status(portfolio_status, warn_threshold=3.0, danger_threshold=5.0):
+    """비중 오차 기반 리밸런싱 신호등 상태를 반환합니다."""
+    items = [i for i in portfolio_status.get('통합', []) if i['티커'] != 'CASH']
+    if not items:
+        return None
+    max_dev      = max((abs(i['비중오차(%p)']) for i in items), default=0)
+    count_warn   = sum(1 for i in items if abs(i['비중오차(%p)']) >= warn_threshold)
+    count_danger = sum(1 for i in items if abs(i['비중오차(%p)']) >= danger_threshold)
+    level = 'danger' if count_danger > 0 else 'warning' if count_warn > 0 else 'good'
+    return {
+        'level':           level,
+        'max_dev':         round(max_dev, 2),
+        'count_warn':      count_warn,
+        'count_danger':    count_danger,
+        'total':           len(items),
+        'warn_threshold':  warn_threshold,
+        'danger_threshold': danger_threshold,
+    }
+
+
+def xirr_calc(cashflows):
+    """
+    XIRR: 입금 날짜를 반영한 연환산 내부수익률 (Newton-Raphson)
+    cashflows: list of (datetime, float) — 입금은 음수, 평가액은 양수
+    returns: 연환산 수익률(%) 또는 None
+    """
+    if len(cashflows) < 2:
+        return None
+    dates, amounts = zip(*cashflows)
+    if not any(a < 0 for a in amounts) or not any(a > 0 for a in amounts):
+        return None
+
+    t0 = min(dates)
+    years = [(d - t0).days / 365.25 for d in dates]
+
+    def npv(r):
+        return sum(a / (1 + r) ** t for a, t in zip(amounts, years))
+
+    def d_npv(r):
+        return -sum(t * a / (1 + r) ** (t + 1) for a, t in zip(amounts, years))
+
+    for r0 in [0.1, 0.0, 0.5, -0.05]:
+        r = r0
+        try:
+            for _ in range(200):
+                f, df = npv(r), d_npv(r)
+                if abs(df) < 1e-12:
+                    break
+                r_new = max(r - f / df, -0.9999)
+                if abs(r_new - r) < 1e-7:
+                    r = r_new
+                    break
+                r = r_new
+            if -0.9999 < r < 100:
+                return round(r * 100, 2)
+        except Exception:
+            continue
+    return None
+
+
 def get_portfolio_summary_stats(portfolio_status):
     """수익률 및 비중 오차 통계를 계산합니다."""
     summary_stats = {}
     total_net_deposit = 0
-    
-    account_deposits = {}
+
+    account_deposits  = {}
+    account_cashflows = {}  # {acc: [(datetime, amount), ...]}  입금은 음수
+
     for acc in ACCOUNTS:
         ledger = read_ledger(acc)
-        acc_deposit = sum(float(str(r.get('cash_delta', 0)).replace(',','')) for r in ledger if r.get('type') == 'DEPOSIT')
-        account_deposits[acc] = acc_deposit
+        acc_deposit = 0
+        acc_flows   = []
+        for r in ledger:
+            if r.get('type') == 'DEPOSIT':
+                amount = float(str(r.get('cash_delta', 0)).replace(',', ''))
+                try:
+                    ts = datetime.strptime(str(r.get('timestamp', ''))[:10], '%Y-%m-%d')
+                    acc_flows.append((ts, -amount))  # 투자자 입장에서 지출 → 음수
+                except ValueError:
+                    pass
+                acc_deposit += amount
+        account_deposits[acc]  = acc_deposit
+        account_cashflows[acc] = acc_flows
         total_net_deposit += acc_deposit
+
+    today          = datetime.now()
+    total_cashflows = [flow for flows in account_cashflows.values() for flow in flows]
 
     for acc in ['통합'] + ACCOUNTS:
         status_list = portfolio_status.get(acc, [])
-        if not status_list: continue
-            
-        df_res = pd.DataFrame(status_list)
-        acc_eval = df_res['평가금액'].sum()
-        turnover = round(df_res['비중오차(%p)'].abs().sum() / 2, 2)
-        
-        deposit = total_net_deposit if acc == '통합' else account_deposits.get(acc, 0)
-        roi = round(((acc_eval / deposit) - 1) * 100, 2) if deposit > 0 else 0
-        summary_stats[acc] = {'deposit': deposit, 'eval': acc_eval, 'roi': roi, 'turnover': turnover}
-        
+        if not status_list:
+            continue
+
+        df_res    = pd.DataFrame(status_list)
+        acc_eval  = df_res['평가금액'].sum()
+        turnover  = round(df_res['비중오차(%p)'].abs().sum() / 2, 2)
+        deposit   = total_net_deposit if acc == '통합' else account_deposits.get(acc, 0)
+        roi       = round(((acc_eval / deposit) - 1) * 100, 2) if deposit > 0 else 0
+
+        # XIRR: 입금 내역(음수) + 오늘 평가액(양수)을 합쳐 연환산 수익률 계산
+        flows = (total_cashflows if acc == '통합' else account_cashflows.get(acc, []))
+        xirr  = xirr_calc(flows + [(today, acc_eval)]) if flows else None
+
+        summary_stats[acc] = {
+            'deposit': deposit, 'eval': acc_eval,
+            'roi': roi, 'turnover': turnover, 'xirr': xirr,
+        }
+
     return summary_stats
 
 # ── 포트폴리오 현황 계산 ─────────────────────────────────────
@@ -501,7 +768,7 @@ def build_equity_df(account):
     return df
 
 
-def get_portfolio_status():
+def get_portfolio_status(extra_tickers=None):
     settings_data = get_portfolio_settings()
 
     # 전체 거래 DataFrame
@@ -513,10 +780,13 @@ def get_portfolio_status():
     held_tickers = set(df_all['ticker'].unique()) if not df_all.empty else set()
     target_tickers = {t for t, v in settings_data.items() if v['weight'] > 0 and v.get('is_active', True)}
     all_unique_tickers = {t for t in (held_tickers | target_tickers) if t and t not in ('-', 'NAN', 'nan', 'CASH')}
+    if extra_tickers:
+        all_unique_tickers |= {t for t in extra_tickers if t and t not in ('-', 'CASH')}
 
     # 2. 병렬로 현재가 가져오기 (성능 개선 핵심)
     with ThreadPoolExecutor(max_workers=10) as executor:
-        executor.map(get_current_price, all_unique_tickers)
+        # list()로 감싸서 모든 스레드가 완료될 때까지 기다립니다 (Lazy map 방지)
+        list(executor.map(get_current_price, all_unique_tickers))
 
     # 계좌별 현금 잔고
     cash_by_acc = {acc: get_cash_balance(acc) for acc in ACCOUNTS}
@@ -563,6 +833,8 @@ def get_portfolio_status():
                 '보유수량':    round(current_qty, 2),
                 '평단가':      round(avg_price),
                 '현재가':      cur_price,
+                'high52':      price_cache.get(ticker, {}).get('high52', 0),
+                'low52':       price_cache.get(ticker, {}).get('low52', 0),
                 '매수금액':    round(current_qty * avg_price),
                 '평가금액':    round(current_qty * cur_price),
                 '손익률(%)':   round(((cur_price / avg_price) - 1) * 100, 2) if avg_price > 0 else 0,
@@ -573,6 +845,7 @@ def get_portfolio_status():
         grouped.append({
             '티커': 'CASH', '종목명': '현금(예수금)', '목표비중(%)': cash_target,
             '보유수량': round(cash_balance), '평단가': 1, '현재가': 1,
+            'high52': 0, 'low52': 0,
             '매수금액': round(cash_balance), '평가금액': round(cash_balance), '손익률(%)': 0.0,
         })
 
@@ -643,7 +916,11 @@ def index():
         ledger_data[acc] = display
 
     settings_rows    = read_settings_rows()
-    portfolio_status = get_portfolio_status()
+    
+    # 알림 대상 종목들도 시세 조회 대상에 포함하여 52주 데이터 등을 확보
+    alert_tickers = [a['ticker'] for a in alerts if a.get('type') == 'PRICE']
+    portfolio_status = get_portfolio_status(extra_tickers=alert_tickers)
+    
     exchange_data    = get_exchange_rates()
 
     # ── 정보 갱신 시간 계산 ──
@@ -668,21 +945,50 @@ def index():
                 ref_val = item['평단가'] if item else 0
             elif alert.get('ref_type') == 'LAST':
                 ref_val = get_last_purchase_price(ticker)
+            elif alert.get('ref_type') == 'LAST_SELL':
+                ref_val = get_last_sale_price(ticker)
             elif alert.get('ref_type') == 'HIGH52':
                 ref_val = price_cache.get(ticker, {}).get('high52', 0)
+            elif alert.get('ref_type') == 'LOW52':
+                ref_val = price_cache.get(ticker, {}).get('low52', 0)
+            elif alert.get('ref_type') == 'SESSION_HIGH':
+                ref_val = price_cache.get(ticker, {}).get('session_high', 0)
+            elif alert.get('ref_type') == 'ROI':
+                item = next((i for i in portfolio_status.get('통합', []) if i['티커'] == ticker), None)
+                ref_val = item['평단가'] if item else 0
             
             if ref_val > 0:
                 try:
+                    # 기준가 저장 (화면 표시용)
+                    alert['ref_price'] = ref_val
                     val_f = float(alert.get('value', 0))
-                    if alert.get('condition') == 'UP_PCT':
+                    if alert.get('ref_type') == 'ROI':
                         alert['target_price'] = ref_val * (1 + val_f / 100)
-                    elif alert.get('condition') == 'DOWN_PCT':
-                        alert['target_price'] = ref_val * (1 - val_f / 100)
+                    else:
+                        if alert.get('condition') == 'UP_PCT':
+                            alert['target_price'] = ref_val * (1 + val_f / 100)
+                        elif alert.get('condition') == 'DOWN_PCT':
+                            alert['target_price'] = ref_val * (1 - val_f / 100)
                 except: pass
 
     cash_balances    = {acc: get_cash_balance(acc) for acc in ACCOUNTS}
     cash_balances['통합'] = sum(cash_balances.values())
     summary_stats    = get_portfolio_summary_stats(portfolio_status)
+
+    # 포트폴리오 스냅샷 저장 (1시간 간격 rate limit 적용)
+    total_s = summary_stats.get('통합', {})
+    save_portfolio_snapshot(total_s.get('eval', 0), total_s.get('deposit', 0))
+    history = get_portfolio_history()
+
+    # ── 인사이트 카드 계산 ──
+    dollar_exposure  = calc_dollar_exposure(portfolio_status, settings_data, exchange_data)
+    period_pnl       = calc_period_pnl(history)
+    try:
+        warn_th   = float(telegram_config.get('warn_threshold',   3))
+        danger_th = float(telegram_config.get('danger_threshold', 5))
+    except Exception:
+        warn_th, danger_th = 3.0, 5.0
+    rebalance_status = get_rebalance_status(portfolio_status, warn_th, danger_th)
 
     # ── 리밸런싱 추천 계산 (통합 계좌 기준) ──
     # 모든 계좌를 미리 초기화하여 추천 내역이 없어도 표시되도록 함
@@ -736,7 +1042,7 @@ def index():
                            settings_rows=settings_rows,
                            settings_data=settings_data,
                            status=portfolio_status,
-                           summary_stats=summary_stats, # 추가됨
+                           summary_stats=summary_stats,
                            cash_balances=cash_balances,
                            exchange=exchange_data,
                            telegram_config=telegram_config,
@@ -745,6 +1051,10 @@ def index():
                            total_buy_amt=total_buy_amt_all,
                            last_updated=last_updated_str,
                            next_update=next_update_str,
+                           history=history,
+                           dollar_exposure=dollar_exposure,
+                           period_pnl=period_pnl,
+                           rebalance_status=rebalance_status,
                            accounts=ACCOUNTS,
                            type_ko=TYPE_KO)
 
@@ -817,10 +1127,11 @@ def delete_last(account):
 
 @app.route('/add_setting', methods=['POST'])
 def add_setting():
-    ticker = request.form.get('set_ticker', '').strip()
-    name   = request.form.get('set_name',   '').strip()
-    cls    = request.form.get('set_class',  '').strip()
-    show   = request.form.get('set_show', 'Y').strip() # 체크박스 값
+    ticker   = request.form.get('set_ticker',   '').strip()
+    name     = request.form.get('set_name',     '').strip()
+    cls      = request.form.get('set_class',    '').strip()
+    show     = request.form.get('set_show',    'Y').strip()
+    currency = request.form.get('set_currency', 'KRW').strip()
     try:
         weight = float(request.form.get('set_weight', '0'))
     except ValueError:
@@ -830,8 +1141,8 @@ def add_setting():
         with open(SETTINGS_FILE, 'a', encoding='utf-8', newline='') as f:
             w = csv.writer(f, delimiter='\t')
             if write_header:
-                w.writerow(['티커', '종목명', '자산군', '목표비중', '표시'])
-            w.writerow([ticker, name, cls, weight, show])
+                w.writerow(['티커', '종목명', '자산군', '목표비중', '활성화', '통화'])
+            w.writerow([ticker, name, cls, weight, show, currency])
     return redirect(url_for('index') + '?tab=settings')
 
 
@@ -843,20 +1154,22 @@ def delete_setting(row_idx):
 @app.route('/update_all_settings', methods=['POST'])
 def update_all_settings():
     """설정 탭에서 체크박스 및 비중 변경 사항을 일괄 저장합니다."""
-    tickers = request.form.getlist('ticker')
-    names = request.form.getlist('name')
-    classes = request.form.getlist('class')
-    weights = request.form.getlist('weight')
-    actives = request.form.getlist('active')  # 체크된 티커들의 리스트
+    tickers    = request.form.getlist('ticker')
+    names      = request.form.getlist('name')
+    classes    = request.form.getlist('class')
+    weights    = request.form.getlist('weight')
+    actives    = request.form.getlist('active')
+    currencies = request.form.getlist('currency')
 
     with open(SETTINGS_FILE, 'w', encoding='utf-8', newline='') as f:
         w = csv.writer(f, delimiter='\t')
-        w.writerow(['티커', '종목명', '자산군', '목표비중', '활성화'])
+        w.writerow(['티커', '종목명', '자산군', '목표비중', '활성화', '통화'])
         for i in range(len(tickers)):
-            t = tickers[i]
+            t        = tickers[i]
             is_active = 'Y' if t in actives else 'N'
-            w.writerow([t, names[i], classes[i], weights[i], is_active])
-            
+            currency  = currencies[i] if i < len(currencies) else 'KRW'
+            w.writerow([t, names[i], classes[i], weights[i], is_active, currency])
+
     return redirect(url_for('index') + '?tab=settings')
 
 @app.route('/update_telegram', methods=['POST'])
@@ -871,12 +1184,13 @@ def update_telegram():
 @app.route('/update_global_config', methods=['POST'])
 def update_global_config():
     """시스템 전반의 감시 및 캐시 주기를 업데이트합니다."""
-    interval = request.form.get('interval', '3600').strip()
+    interval        = request.form.get('interval',        '3600').strip()
+    warn_threshold  = request.form.get('warn_threshold',  '3').strip()
+    danger_threshold = request.form.get('danger_threshold', '5').strip()
     config = get_telegram_config()
-    # 봇 토큰과 채팅 ID는 유지하고 주기만 업데이트
-    save_telegram_config(config['token'], config['chat_id'], config['enabled'], interval)
-    
-    flash(f"시스템 감시 및 정보 갱신 주기가 {interval}초로 변경되었습니다.")
+    save_telegram_config(config['token'], config['chat_id'], config['enabled'],
+                         interval, warn_threshold, danger_threshold)
+    flash("설정이 저장되었습니다.")
     return redirect(url_for('index') + '?tab=settings')
 
 @app.route('/add_alert', methods=['POST'])

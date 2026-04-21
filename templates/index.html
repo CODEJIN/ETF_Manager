@@ -108,6 +108,88 @@
         <p>데이터가 없습니다. 거래 내역을 입력해주세요.</p>
     {% else %}
 
+    <details id="historyDetails" style="margin-bottom:14px;">
+        <summary>📈 포트폴리오 가치 추이</summary>
+        <div style="padding:15px; background:#fafafa; border-radius:8px; border:1px solid #eee; margin-top:12px;">
+            {% if history and history|length > 1 %}
+            <div style="position:relative; height:300px;">
+                <canvas id="historyChart"></canvas>
+            </div>
+            {% else %}
+            <p style="text-align:center; color:#aaa; padding:30px 0; margin:0;">
+                데이터가 쌓이는 중입니다. 1시간마다 자동 기록됩니다.
+            </p>
+            {% endif %}
+        </div>
+    </details>
+
+    {% if dollar_exposure or (period_pnl and period_pnl.monthly) or rebalance_status %}
+    <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:15px; margin-bottom:20px;">
+
+        <!-- 달러 노출도 카드 -->
+        {% if dollar_exposure %}
+        <div style="background:#fff; border:1px solid #eee; border-radius:8px; padding:16px; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size:0.82em; color:#888; margin-bottom:6px;">💵 달러 노출도</div>
+            <div style="font-size:2em; font-weight:bold; color:#2d3436; line-height:1.1;">{{ dollar_exposure.usd_pct }}%</div>
+            <div style="font-size:0.8em; color:#aaa; margin-top:8px; line-height:1.6;">
+                USD 자산: ₩{{ "{:,.0f}".format(dollar_exposure.usd_eval) }}<br>
+                환율 1% 변동 시 ±₩{{ "{:,.0f}".format(dollar_exposure.sensitivity) }} 영향
+                {% if dollar_exposure.usd_rate %}<br><span style="color:#bbb;">현재 환율 $1 = ₩{{ dollar_exposure.usd_rate }}</span>{% endif %}
+            </div>
+        </div>
+        {% else %}
+        <div style="background:#fff; border:1px solid #eee; border-radius:8px; padding:16px; box-shadow:0 2px 4px rgba(0,0,0,0.05); display:flex; align-items:center; justify-content:center; color:#ccc; font-size:0.85em;">
+            설정 탭에서 각 종목의 통화(USD/KRW)를 설정해주세요.
+        </div>
+        {% endif %}
+
+        <!-- 이번 달 손익 카드 -->
+        {% if period_pnl and period_pnl.monthly %}
+        {% set lm = period_pnl.monthly[-1] %}
+        {% set pnl_color = '#d63031' if lm.pnl > 0 else '#0984e3' if lm.pnl < 0 else '#636e72' %}
+        <div style="background:#fff; border:1px solid #eee; border-radius:8px; padding:16px; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size:0.82em; color:#888; margin-bottom:6px;">📅 이번 달 손익 <span style="color:#ccc;">({{ lm.period }})</span></div>
+            <div style="font-size:1.7em; font-weight:bold; color:{{ pnl_color }}; line-height:1.1;">
+                {{ "{:+,.0f}".format(lm.pnl) }}원
+            </div>
+            <div style="font-size:0.8em; color:#aaa; margin-top:8px; line-height:1.6;">
+                수익률: <span style="color:{{ pnl_color }}; font-weight:bold;">{{ lm.roi }}%</span><br>
+                {% if period_pnl.monthly|length > 1 %}
+                {% set pm = period_pnl.monthly[-2] %}
+                전월 ({{ pm.period }}): {{ "{:+,.0f}".format(pm.pnl) }}원 ({{ pm.roi }}%)
+                {% endif %}
+                {% if period_pnl.yearly %}
+                {% set cur_year = period_pnl.yearly[-1] %}
+                <br>올해 누적: {{ "{:+,.0f}".format(cur_year.pnl) }}원
+                {% endif %}
+            </div>
+        </div>
+        {% else %}
+        <div style="background:#fff; border:1px solid #eee; border-radius:8px; padding:16px; box-shadow:0 2px 4px rgba(0,0,0,0.05); display:flex; align-items:center; justify-content:center; color:#ccc; font-size:0.85em;">
+            데이터가 쌓이는 중입니다.
+        </div>
+        {% endif %}
+
+        <!-- 리밸런싱 신호등 카드 -->
+        {% if rebalance_status %}
+        {% set lv = rebalance_status.level %}
+        {% set lv_color = '#00b894' if lv == 'good' else '#e17055' if lv == 'warning' else '#d63031' %}
+        {% set lv_icon  = '🟢' if lv == 'good' else '🟡' if lv == 'warning' else '🔴' %}
+        {% set lv_text  = '균형 유지 중' if lv == 'good' else '점검 권장' if lv == 'warning' else '리밸런싱 필요' %}
+        <div style="background:#fff; border:2px solid {{ lv_color }}; border-radius:8px; padding:16px; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size:0.82em; color:#888; margin-bottom:6px;">⚖️ 리밸런싱 신호등</div>
+            <div style="font-size:1.5em; font-weight:bold; color:{{ lv_color }}; line-height:1.1;">{{ lv_icon }} {{ lv_text }}</div>
+            <div style="font-size:0.8em; color:#aaa; margin-top:8px; line-height:1.6;">
+                최대 오차: <strong>{{ rebalance_status.max_dev }}%p</strong><br>
+                3%p↑ {{ rebalance_status.count_warn }}개 &nbsp;/&nbsp; 5%p↑ {{ rebalance_status.count_danger }}개
+                (총 {{ rebalance_status.total }}개 종목)
+            </div>
+        </div>
+        {% endif %}
+
+    </div>
+    {% endif %}
+
     <details id="chartDetails" style="margin-bottom:28px;">
         <summary>📊 자산 배분 비중 차트 보기</summary>
         <div class="chart-container" style="margin-top:15px;">
@@ -131,14 +213,19 @@
             <div class="summary-banner">
                 <div><span>총 입금액:</span> <strong>₩{{ "{:,.0f}".format(stats.deposit) if stats.deposit else 0 }}</strong></div>
                 <div><span>총 평가액:</span> <strong>₩{{ "{:,.0f}".format(stats.eval) if stats.eval else 0 }}</strong></div>
-                <div><span>누적 수익률:</span> 
+                <div><span>누적 수익률:</span>
                     <strong style="color:{% if stats.roi and stats.roi > 0 %}red{% elif stats.roi and stats.roi < 0 %}blue{% else %}black{% endif %};">
                         {{ stats.roi if stats.roi else 0 }}%
                     </strong>
                 </div>
-                <div style="margin-left: auto; background: #fff; padding: 4px 10px; border-radius: 4px; border: 1px solid #ccc;">
-                    <span>⚖️ 리밸런싱 필요 비율 (통합 오차):</span> <strong style="color:#d35400;">{{ stats.turnover if stats.turnover else 0 }}%</strong>
+                {% if stats.xirr is not none %}
+                <div title="입금 시점을 반영한 연환산 수익률. 일찍 넣은 돈이 오래 굴렸다는 것을 고려합니다.">
+                    <span>연환산 수익률 <span style="font-size:0.8em;color:#999;">(XIRR)</span>:</span>
+                    <strong style="color:{% if stats.xirr > 0 %}red{% elif stats.xirr < 0 %}blue{% else %}black{% endif %};">
+                        {{ stats.xirr }}%
+                    </strong>
                 </div>
+                {% endif %}
             </div>
 
             <table style="margin-top:10px;">
@@ -154,10 +241,25 @@
                     <td style="text-align:left;font-size:0.85em;"><strong>{{ item['종목명'] }}</strong></td>
                     <td>{{ item['목표비중(%)'] }}%</td>
                     <td><strong>{{ item['현재비중(%)'] }}%</strong></td>
-                    <td style="color:{% if item['비중오차(%p)'] > 0 %}red{% elif item['비중오차(%p)'] < 0 %}blue{% else %}black{% endif %};">{{ item['비중오차(%p)'] }}%p</td>
+                    <td style="color:{% if item['비중오차(%p)'] > 0 %}red{% elif item['비중오차(%p)'] < 0 %}blue{% else %}black{% endif %};">
+                        {% if rebalance_status %}
+                        {% set adev = item['비중오차(%p)'] | abs %}
+                        {% if adev >= rebalance_status.danger_threshold %}<span title="위험: {{ rebalance_status.danger_threshold }}%p 초과">🔴</span>
+                        {% elif adev >= rebalance_status.warn_threshold %}<span title="주의: {{ rebalance_status.warn_threshold }}%p 초과">🟡</span>
+                        {% else %}<span title="정상">🟢</span>{% endif %}
+                        {% endif %}
+                        {{ item['비중오차(%p)'] }}%p
+                    </td>
                     <td>{{ item['보유수량'] }}</td>
                     <td>₩{{ "{:,.0f}".format(item['평단가']) }}</td>
-                    <td>₩{{ "{:,.0f}".format(item['현재가']) }}</td>
+                    <td>
+                        ₩{{ "{:,.0f}".format(item['현재가']) }}
+                        {% if item['티커'] != 'CASH' %}
+                        <div style="font-size: 0.72em; color: #999; margin-top: 2px;">
+                            <span title="52주 최고">H: {{ "{:,.0f}".format(item['high52']) }}</span> / <span title="52주 최저">L: {{ "{:,.0f}".format(item['low52']) }}</span>
+                        </div>
+                        {% endif %}
+                    </td>
                     <td>₩{{ "{:,.0f}".format(item['평가금액']) }}</td>
                     <td style="color:{% if item['손익률(%)'] > 0 %}red{% elif item['손익률(%)'] < 0 %}blue{% else %}black{% endif %};"><strong>{{ item['손익률(%)'] }}%</strong></td>
                 </tr>
@@ -353,23 +455,37 @@
     <h3 style="margin-top:0;">⚙️ 시스템 및 포트폴리오 설정</h3>
 
     <div style="background: #f8f9fa; border: 1px solid #dee2e6; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
-        <h4 style="margin-top:0; color:#2c3e50;">⏱️ 정보 업데이트 주기 설정</h4>
-        <form action="{{ url_for('update_global_config') }}" method="POST" style="display: flex; align-items: flex-end; gap: 15px;">
-            <div style="flex: 1;">
-                <label style="display: block; margin-bottom: 5px; font-size: 0.85em; color: #666;">감시 및 가격 캐시 유지 주기 (초 단위)</label>
-                <input type="number" name="interval" value="{{ telegram_config.interval }}" placeholder="3600" min="10" 
-                       style="width: 100%; text-align: left; padding: 8px;" {% if telegram_config.managed_by_env %}readonly{% endif %}>
+        <h4 style="margin-top:0; color:#2c3e50;">⏱️ 시스템 설정</h4>
+        <form action="{{ url_for('update_global_config') }}" method="POST">
+            <div style="display: flex; align-items: flex-end; gap: 15px; margin-bottom: 15px;">
+                <div style="flex: 1;">
+                    <label style="display: block; margin-bottom: 5px; font-size: 0.85em; color: #666;">감시 및 가격 캐시 유지 주기 (초 단위)</label>
+                    <input type="number" name="interval" value="{{ telegram_config.interval }}" placeholder="3600" min="10"
+                           style="width: 100%; text-align: left; padding: 8px;" {% if telegram_config.managed_by_env %}readonly{% endif %}>
+                </div>
             </div>
-            <button type="submit" class="btn-refresh" style="height: 38px; padding: 0 20px;">저장</button>
+            <div style="display: flex; align-items: flex-end; gap: 15px; margin-bottom: 15px;">
+                <div style="flex: 1;">
+                    <label style="display: block; margin-bottom: 5px; font-size: 0.85em; color: #666;">🟡 주의 임계값 (%p) — 이 이상이면 노란불</label>
+                    <input type="number" name="warn_threshold" value="{{ telegram_config.warn_threshold | default(3) }}"
+                           step="0.5" min="0.5" style="width: 100%; text-align: left; padding: 8px;">
+                </div>
+                <div style="flex: 1;">
+                    <label style="display: block; margin-bottom: 5px; font-size: 0.85em; color: #666;">🔴 위험 임계값 (%p) — 이 이상이면 빨간불</label>
+                    <input type="number" name="danger_threshold" value="{{ telegram_config.danger_threshold | default(5) }}"
+                           step="0.5" min="0.5" style="width: 100%; text-align: left; padding: 8px;">
+                </div>
+                <button type="submit" class="btn-refresh" style="height: 38px; padding: 0 20px; white-space: nowrap;">저장</button>
+            </div>
         </form>
-        <p style="margin: 8px 0 0 0; font-size: 0.8em; color: #888;">
-            ※ 이 설정은 <strong>텔레그램 알림 감시 주기</strong>와 <strong>웹 화면 정보의 신선도(캐시)</strong> 모두에 적용됩니다.
+        <p style="margin: 4px 0 0 0; font-size: 0.8em; color: #888;">
+            ※ 감시 주기는 <strong>텔레그램 알림</strong>과 <strong>가격 캐시</strong>에, 신호등 임계값은 현재 상태 탭 종목별 오차 표시에 적용됩니다.
         </p>
     </div>
     
     <form action="{{ url_for('add_setting') }}" method="POST" style="margin-bottom: 25px;">
         <table>
-            <thead><tr><th>티커</th><th>종목명</th><th>자산군</th><th>목표(%)</th><th>추가</th></tr></thead>
+            <thead><tr><th>티커</th><th>종목명</th><th>자산군</th><th>목표(%)</th><th>통화</th><th>추가</th></tr></thead>
             <tbody>
                 <tr class="input-row">
                     <td><input type="text"   name="set_ticker"  placeholder="379800"          required></td>
@@ -383,6 +499,12 @@
                         </select>
                     </td>
                     <td><input type="number" name="set_weight"  placeholder="25" step="0.1"   required></td>
+                    <td>
+                        <select name="set_currency">
+                            <option value="KRW">KRW</option>
+                            <option value="USD">USD</option>
+                        </select>
+                    </td>
                     <td><button type="submit" class="btn-add">추가</button></td>
                 </tr>
             </tbody>
@@ -399,17 +521,19 @@
         <table>
             <thead>
                 <tr>
-                    <th style="width: 8%;">사용</th>
-                    <th style="width: 15%;">티커</th>
-                    <th style="width: 32%;">종목명</th>
+                    <th style="width: 7%;">사용</th>
+                    <th style="width: 13%;">티커</th>
+                    <th style="width: 28%;">종목명</th>
                     <th style="width: 12%;">자산군</th>
-                    <th style="width: 18%;">목표(%)</th>
+                    <th style="width: 15%;">목표(%)</th>
+                    <th style="width: 10%;">통화</th>
                     <th style="width: 15%;">삭제</th>
                 </tr>
             </thead>
             <tbody>
                 {% for row_idx, row in settings_rows %}
                 {% set is_active = (row[4] == 'Y') if row|length > 4 else True %}
+                {% set currency  = row[5] if row|length > 5 else 'KRW' %}
                 <tr>
                     <td>
                         <input type="checkbox" name="active" value="{{ row[0] }}" {% if is_active %}checked{% endif %} style="width: 18px; height: 18px; cursor: pointer;">
@@ -424,6 +548,12 @@
                     <td>{{ row[2] }}</td>
                     <td>
                         <input type="number" name="weight" value="{{ row[3] }}" step="0.1" style="width: 60px;"> %
+                    </td>
+                    <td>
+                        <select name="currency" style="width: 70px;">
+                            <option value="KRW" {% if currency == 'KRW' %}selected{% endif %}>KRW</option>
+                            <option value="USD" {% if currency == 'USD' %}selected{% endif %}>USD</option>
+                        </select>
                     </td>
                     <td>
                         <button type="submit" formaction="{{ url_for('delete_setting', row_idx=row_idx) }}" class="btn-delete" onclick="return confirm('삭제할까요?');">삭제</button>
@@ -465,7 +595,6 @@
         <form action="{{ url_for('test_telegram') }}" method="POST" style="flex: 1;">
             <button type="submit" class="btn-refresh" style="background-color: #6c757d; width: 100%; padding: 12px;">테스트 메시지 전송</button>
         </form>
-            </div>
 
         <div style="margin-top: 40px; border-top: 2px solid #eee; padding-top: 20px;">
             <h4 style="color:#2c3e50; margin-bottom: 12px;">📈 가격 변동 알림 추가</h4>
@@ -478,14 +607,18 @@
                     {% endfor %}
                 </select>
                 <select name="ref_type" style="width: 140px;">
-                    <option value="AVG">평단가 대비</option>
-                    <option value="LAST">마지막구매가 대비</option>
-                    <option value="HIGH52">52주최고가 대비</option>
+                    <option value="ROI">목표 수익률(%) 지점</option>
+                    <option value="AVG">평단가 기준(변동% )</option>
+                    <option value="SESSION_HIGH">실시간 고점 대비(Trailing)</option>
+                    <option value="HIGH52">52주 최고가 대비</option>
+                    <option value="LOW52">52주 최저가 대비</option>
+                    <option value="LAST">마지막 구매가 대비</option>
+                    <option value="LAST_SELL">마지막 판매가 대비</option>
                 </select>
-                <input type="number" name="value" placeholder="값" style="width: 70px;" required>
+                <input type="number" step="0.1" name="value" placeholder="값(%)" style="width: 75px;" required>
                 <select name="condition" style="width: 130px;">
-                    <option value="UP_PCT">% ▲ 상승 시</option>
-                    <option value="DOWN_PCT">% ▼ 하락 시</option>
+                    <option value="UP_PCT">▲ 상향 돌파 시</option>
+                    <option value="DOWN_PCT">▼ 하향 돌파 시</option>
                 </select>
                 <button type="submit" class="btn-add">➕ 등록</button>
             </form>
@@ -535,9 +668,16 @@
                         <td style="text-align: left; font-size: 0.85em; color: #666;">
                             {% if alert.ref_type == 'AVG' %}평단가 대비
                             {% elif alert.ref_type == 'LAST' %}마지막구매가 대비
+                            {% elif alert.ref_type == 'LAST_SELL' %}마지막판매가 대비
                             {% elif alert.ref_type == 'HIGH52' %}52주최고가 대비
+                            {% elif alert.ref_type == 'LOW52' %}52주최저가 대비
+                            {% elif alert.ref_type == 'SESSION_HIGH' %}최근 고점 대비
+                            {% elif alert.ref_type == 'ROI' %}지정 수익률(%p) 지점
                             {% elif alert.ref_type == 'TURNOVER' %}전체 비중오차
                             {% else %}개별 비중오차{% endif %}
+                            {% if alert.ref_price %}
+                            <div style="font-size: 0.85em; color: #999;">(기준: ₩{{ "{:,.0f}".format(alert.ref_price) }})</div>
+                            {% endif %}
                             
                             {% if alert.condition == 'UP_PCT' %}이상 상승 시
                             {% elif alert.condition == 'DOWN_PCT' %}이상 하락 시
@@ -621,6 +761,77 @@ function onTypeChange(acc) {
         document.getElementById('note_' + acc).placeholder = '분배금 메모';
     }
 }
+
+// ── 히스토리 차트 ────────────────────────────────────────────
+(function () {
+    const histData = {{ history | tojson | safe }};
+    if (!histData || histData.length < 2) return;
+
+    const sample = histData.slice(-300);  // 최대 300개 포인트
+    const labels   = sample.map(d => d.timestamp.slice(0, 16));
+    const evals    = sample.map(d => parseInt(d.eval));
+    const deposits = sample.map(d => parseInt(d.deposit));
+    const showDots = sample.length <= 60;
+
+    new Chart(document.getElementById('historyChart').getContext('2d'), {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: '총 평가액',
+                    data: evals,
+                    borderColor: '#2980b9',
+                    backgroundColor: 'rgba(41,128,185,0.07)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: showDots ? 3 : 0,
+                    pointHoverRadius: 5,
+                },
+                {
+                    label: '총 입금액',
+                    data: deposits,
+                    borderColor: '#bdc3c7',
+                    borderDash: [6, 4],
+                    fill: false,
+                    tension: 0,
+                    pointRadius: 0,
+                    pointHoverRadius: 3,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { position: 'top' },
+                tooltip: {
+                    callbacks: {
+                        label: function(ctx) {
+                            const val = ctx.raw;
+                            const dep = deposits[ctx.dataIndex];
+                            const roi = dep > 0 ? ((val / dep - 1) * 100).toFixed(2) : '0.00';
+                            if (ctx.datasetIndex === 0)
+                                return `평가액: ₩${val.toLocaleString()} (수익률 ${roi}%)`;
+                            return `입금액: ₩${val.toLocaleString()}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    ticks: {
+                        callback: val => '₩' + Math.round(val / 10000).toLocaleString() + '만'
+                    }
+                },
+                x: {
+                    ticks: { maxTicksLimit: 10, maxRotation: 30 }
+                }
+            }
+        }
+    });
+})();
 
 // ── 차트 ────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function () {
