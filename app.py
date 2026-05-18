@@ -45,7 +45,18 @@ TYPE_KO = {
 }
 
 price_cache = {}
+# HTTP 연결 재사용을 위한 글로벌 세션 설정
+http_session = requests.Session()
+http_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+})
 
+# API 호출 타임아웃 설정 (초)
+API_TIMEOUT = 10
+# API 재시도 횟수
+API_MAX_RETRIES = 2
+# 재시도 대기 시간 (초)
+API_RETRY_DELAY = 2
 
 # ── 환율 크롤링 ──────────────────────────────────────────────
 def get_exchange_rates():
@@ -65,66 +76,80 @@ def get_exchange_rates():
         'JPY': {'name': '일본 JPY (100엔)', 'value': '0.00', 'change': '0.00', 'status': 'same'},
         'CNY': {'name': '중국 CNY',        'value': '0.00', 'change': '0.00', 'status': 'same'},
     }
-    try:
-        res = requests.get('https://finance.naver.com/marketindex/', timeout=3)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            for item in soup.select('#exchangeList > li'):
-                title_el = item.select_one('.h_lst')
-                title    = title_el.text if title_el else ''
-                sym = ('USD' if '미국' in title else
-                       'JPY' if '일본' in title else
-                       'CNY' if '중국' in title else None)
-                if not sym:
-                    continue
-                val_el = item.select_one('.value')
-                chg_el = item.select_one('.change')
-                hi_el  = item.select_one('.head_info')
-                status = ('up'   if hi_el and '상승' in hi_el.text else
-                          'down' if hi_el and '하락' in hi_el.text else 'same')
-                rates[sym] = {
-                    'name':   '일본 JPY (100엔)' if sym == 'JPY' else title.strip(),
-                    'value':  val_el.text if val_el else '0.00',
-                    'change': chg_el.text if chg_el else '0.00',
-                    'status': status,
-                }
-            price_cache['EXCHANGE_RATES'] = {'data': rates, 'time': now}
-    except Exception as e:
-        print(f'❌ [환율] {e}')
+    # 재시도 로직
+    for attempt in range(API_MAX_RETRIES + 1):
+        try:
+            res = http_session.get('https://finance.naver.com/marketindex/', timeout=API_TIMEOUT)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                for item in soup.select('#exchangeList > li'):
+                    title_el = item.select_one('.h_lst')
+                    title    = title_el.text if title_el else ''
+                    sym = ('USD' if '미국' in title else
+                           'JPY' if '일본' in title else
+                           'CNY' if '중국' in title else None)
+                    if not sym:
+                        continue
+                    val_el = item.select_one('.value')
+                    chg_el = item.select_one('.change')
+                    hi_el  = item.select_one('.head_info')
+                    status = ('up'   if hi_el and '상승' in hi_el.text else
+                              'down' if hi_el and '하락' in hi_el.text else 'same')
+                    rates[sym] = {
+                        'name':   '일본 JPY (100엔)' if sym == 'JPY' else title.strip(),
+                        'value':  val_el.text if val_el else '0.00',
+                        'change': chg_el.text if chg_el else '0.00',
+                        'status': status,
+                    }
+                price_cache['EXCHANGE_RATES'] = {'data': rates, 'time': now}
+                return rates
+            else:
+                print(f'⚠️ [환율] HTTP {res.status_code} (시도 {attempt+1}/{API_MAX_RETRIES+1})')
+        except Exception as e:
+            print(f'⚠️ [환율] {e} (시도 {attempt+1}/{API_MAX_RETRIES+1})')
+        if attempt < API_MAX_RETRIES:
+            print(f'⏳ [환율] {API_RETRY_DELAY}초 후 재시도...')
+            time.sleep(API_RETRY_DELAY)
+    # 모든 재시도 실패 시 마지막 rates 반환
+    print('❌ [환율] 모든 재시도 실패')
     return rates
 
 
 # ── 현재가 크롤링 ────────────────────────────────────────────
 def _fetch_52week(ticker):
     """네이버 금융 종목 페이지에서 52주 최고/최저가를 스크래핑합니다."""
-    try:
-        url = f"https://finance.naver.com/item/main.naver?code={ticker}"
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            for th in soup.find_all('th'):
-                if '52주' in th.get_text(strip=True):
-                    td = th.find_next_sibling('td')
-                    if td:
-                        # 형식: "223,000l53,700" ('l'로 최고/최저 구분)
-                        parts = td.get_text(strip=True).replace(',', '').split('l')
-                        if len(parts) == 2:
-                            try:
-                                return int(float(parts[0])), int(float(parts[1]))
-                            except:
-                                pass
-    except Exception as e:
-        print(f'❌ [52주 {ticker}] {e}')
+    for attempt in range(API_MAX_RETRIES + 1):
+        try:
+            url = f"https://finance.naver.com/item/main.naver?code={ticker}"
+            res = http_session.get(url, timeout=API_TIMEOUT)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                for th in soup.find_all('th'):
+                    if '52주' in th.get_text(strip=True):
+                        td = th.find_next_sibling('td')
+                        if td:
+                            # 형식: "223,000l53,700" ('l'로 최고/최저 구분)
+                            parts = td.get_text(strip=True).replace(',', '').split('l')
+                            if len(parts) == 2:
+                                try:
+                                    return int(float(parts[0])), int(float(parts[1]))
+                                except:
+                                    pass
+            else:
+                print(f'⚠️ [52주 {ticker}] HTTP {res.status_code} (시도 {attempt+1}/{API_MAX_RETRIES+1})')
+        except Exception as e:
+            print(f'⚠️ [52주 {ticker}] {e} (시도 {attempt+1}/{API_MAX_RETRIES+1})')
+        if attempt < API_MAX_RETRIES:
+            time.sleep(API_RETRY_DELAY)
+    print(f'❌ [52주 {ticker}] 모든 재시도 실패')
     return 0, 0
 
 
 def get_current_price(ticker):
     now = datetime.now()
-    config = get_telegram_config()
-    try:
-        interval_sec = int(config.get('interval', 300))
-    except:
-        interval_sec = 300
+    # 가격 캐시 주기는 텔레그램 알림 주기와 별개로 짧게(예: 2분) 설정합니다.
+    # 알림 주기가 1시간으로 설정되어 있어도 UI에서는 최신가를 더 자주 확인할 수 있게 합니다.
+    interval_sec = 120 
 
     if ticker in price_cache:
         if now - price_cache[ticker]['time'] < timedelta(seconds=interval_sec):
@@ -136,35 +161,59 @@ def get_current_price(ticker):
         except (ValueError, TypeError):
             return 0
 
-    try:
-        # polling API: resultCode 확인 후 중첩 구조에서 데이터 추출
-        url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{ticker}"
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+    # 재시도 로직
+    for attempt in range(API_MAX_RETRIES + 1):
+        try:
+            # 종목 코드는 반드시 6자리여야 합니다 (예: 5930 -> 005930)
+            ticker_code = ticker.strip().zfill(6) if ticker.isdigit() else ticker
+            
+            # polling API: Referer 헤더를 추가하여 차단을 방지합니다.
+            url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{ticker_code}"
+            headers = {
+                'Referer': 'https://finance.naver.com/'
+            }
+            res = http_session.get(url, headers=headers, timeout=API_TIMEOUT)
 
-        if res.status_code == 200:
-            data = res.json()
-            if data.get('resultCode') == 'success':
-                item = data.get('result', {}).get('areas', [{}])[0].get('datas', [{}])[0]
-                price = safe_int(item.get('nv', 0))
-                if price > 0:
-                    old_data = price_cache.get(ticker, {})
-                    session_high = max(price, old_data.get('session_high', 0))
+            if res.status_code == 200:
+                data = res.json()
+                if data.get('resultCode') == 'success':
+                    item = data.get('result', {}).get('areas', [{}])[0].get('datas', [{}])[0]
+                    price = safe_int(item.get('nv', 0))
+                    if price > 0:
+                        old_data = price_cache.get(ticker, {})
+                        session_high = max(price, old_data.get('session_high', 0))
 
-                    # 52주 고/저가: 현재가와 동일 주기로 갱신, 실패 시 이전 캐시 유지
-                    high52, low52 = _fetch_52week(ticker)
-                    high52 = high52 or old_data.get('high52', 0)
-                    low52  = low52  or old_data.get('low52',  0)
+                        # 52주 고/저가는 자주 변하지 않으므로 12시간마다 한 번만 갱신합니다.
+                        last_52w_update = old_data.get('52w_time', datetime.min)
+                        if now - last_52w_update > timedelta(hours=12):
+                            high52, low52 = _fetch_52week(ticker_code)
+                            last_52w_update = now
+                        else:
+                            high52 = old_data.get('high52', 0)
+                            low52  = old_data.get('low52',  0)
 
-                    price_cache[ticker] = {
-                        'price':        price,
-                        'high52':       high52,
-                        'low52':        low52,
-                        'session_high': session_high,
-                        'time':         now,
-                    }
-                    return price
-    except Exception as e:
-        print(f'❌ [{ticker}] {e}')
+                        high52 = high52 or old_data.get('high52', 0)
+                        low52  = low52  or old_data.get('low52',  0)
+
+                        price_cache[ticker] = {
+                            'price':        price,
+                            'high52':       high52,
+                            'low52':        low52,
+                            'session_high': session_high,
+                            'time':         now,
+                            '52w_time':     last_52w_update
+                        }
+                        return price
+                else:
+                    print(f'⚠️ [{ticker}] API error (시도 {attempt+1}/{API_MAX_RETRIES+1})')
+            else:
+                print(f'⚠️ [{ticker}] HTTP {res.status_code} (시도 {attempt+1}/{API_MAX_RETRIES+1})')
+        except Exception as e:
+            print(f'⚠️ [{ticker}] {e} (시도 {attempt+1}/{API_MAX_RETRIES+1})')
+        if attempt < API_MAX_RETRIES:
+            time.sleep(API_RETRY_DELAY)
+    # 모든 재시도 실패 시 캐시된 값 반환
+    print(f'❌ [{ticker}] 모든 재시도 실패')
     return price_cache.get(ticker, {}).get('price', 0)
 
 
@@ -853,6 +902,9 @@ def get_portfolio_status(extra_tickers=None):
             avg_price = current_cost_basis / current_quantity if current_quantity > 0 else 0
             cur_price = get_current_price(ticker) or avg_price
 
+            buy_amt = round(current_quantity * avg_price)
+            eval_amt = round(current_quantity * cur_price)
+
             grouped.append({
                 '티커':        ticker,
                 '종목명':      settings_data.get(ticker, {}).get('name', ticker),
@@ -862,8 +914,9 @@ def get_portfolio_status(extra_tickers=None):
                 '현재가':      cur_price,
                 'high52':      price_cache.get(ticker, {}).get('high52', 0),
                 'low52':       price_cache.get(ticker, {}).get('low52', 0),
-                '매수금액':    round(current_quantity * avg_price),
-                '평가금액':    round(current_quantity * cur_price),
+                '매수금액':    buy_amt,
+                '평가금액':    eval_amt,
+                '손익금액':    eval_amt - buy_amt,
                 '손익률(%)':   round(((cur_price / avg_price) - 1) * 100, 2) if avg_price > 0 else 0,
             })
 
@@ -873,7 +926,7 @@ def get_portfolio_status(extra_tickers=None):
             '티커': 'CASH', '종목명': '현금(예수금)', '목표비중(%)': cash_target,
             '보유수량': round(cash_balance), '평단가': 1, '현재가': 1,
             'high52': 0, 'low52': 0,
-            '매수금액': round(cash_balance), '평가금액': round(cash_balance), '손익률(%)': 0.0,
+            '매수금액': round(cash_balance), '평가금액': round(cash_balance), '손익률(%)': 0.0, '손익금액': 0,
         })
 
         df_res    = pd.DataFrame(grouped)
@@ -955,12 +1008,13 @@ def index():
     last_updated_dt = max(update_times) if update_times else None
     
     try:
-        interval_sec = int(telegram_config.get('interval', 3600))
+        # UI 상단의 '다음 갱신' 시간 표시를 위해 get_current_price와 동일한 주기를 사용합니다.
+        ui_interval = 120
     except:
-        interval_sec = 3600
+        ui_interval = 120
         
     last_updated_str = last_updated_dt.strftime('%H:%M:%S') if last_updated_dt else "-"
-    next_update_str = (last_updated_dt + timedelta(seconds=interval_sec)).strftime('%H:%M:%S') if last_updated_dt else "즉시"
+    next_update_str = (last_updated_dt + timedelta(seconds=ui_interval)).strftime('%H:%M:%S') if last_updated_dt else "즉시"
 
     # 알림 목록에 표시할 목표 가격 계산
     for alert in alerts:
