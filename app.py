@@ -48,15 +48,49 @@ price_cache = {}
 # HTTP 연결 재사용을 위한 글로벌 세션 설정
 http_session = requests.Session()
 http_session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
 })
 
 # API 호출 타임아웃 설정 (초)
-API_TIMEOUT = 10
+API_TIMEOUT = 5
 # API 재시도 횟수
-API_MAX_RETRIES = 2
+API_MAX_RETRIES = 1
 # 재시도 대기 시간 (초)
-API_RETRY_DELAY = 2
+API_RETRY_DELAY = 1
+
+import json
+
+def _fetch_fx_120d_ma(sym):
+    """야후 파이낸스 API를 통해 환율 120일 이동평균선을 계산합니다."""
+    for attempt in range(API_MAX_RETRIES + 1):
+        try:
+            yahoo_sym = f"{sym}KRW=X"
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_sym}?range=150d&interval=1d"
+            res = http_session.get(url, timeout=API_TIMEOUT)
+            if res.status_code == 200:
+                data = res.json()
+                result = data.get('chart', {}).get('result', [])
+                if result:
+                    closes = result[0].get('indicators', {}).get('quote', [{}])[0].get('close', [])
+                    closes = [c for c in closes if c is not None]
+                    if len(closes) >= 120:
+                        closes = closes[-120:]
+                    if closes:
+                        ma = round(sum(closes) / len(closes), 2)
+                        if sym == 'JPY' and ma < 50:
+                            ma *= 100
+                        return ma
+                print(f"⚠️ [FX 120MA {sym}] 야후 API 파싱 실패 또는 빈 결과")
+            else:
+                print(f"⚠️ [FX 120MA {sym}] HTTP {res.status_code} 에러 (시도 {attempt+1}/{API_MAX_RETRIES+1})")
+        except Exception as e:
+            print(f'⚠️ [FX 120MA {sym}] 예외 발생: {e}')
+        if attempt < API_MAX_RETRIES:
+            time.sleep(API_RETRY_DELAY)
+    print(f'❌ [FX 120MA {sym}] 모든 재시도 실패')
+    return 0.0
 
 # ── 환율 크롤링 ──────────────────────────────────────────────
 def get_exchange_rates():
@@ -67,9 +101,20 @@ def get_exchange_rates():
     except:
         interval_sec = 600
 
+    # 1. 120일 이평선 캐시 업데이트 (12시간 주기)
+    fx_ma_cache = price_cache.get('FX_MA', {'time': datetime.min, 'data': {}})
+    if now - fx_ma_cache['time'] > timedelta(hours=12):
+        for sym in ['USD', 'JPY', 'CNY']:
+            fx_ma_cache['data'][sym] = _fetch_fx_120d_ma(sym)
+        fx_ma_cache['time'] = now
+        price_cache['FX_MA'] = fx_ma_cache
+
     if 'EXCHANGE_RATES' in price_cache:
         if now - price_cache['EXCHANGE_RATES']['time'] < timedelta(seconds=interval_sec):
-            return price_cache['EXCHANGE_RATES']['data']
+            rates = price_cache['EXCHANGE_RATES']['data']
+            for sym in rates:
+                rates[sym]['ma120'] = fx_ma_cache['data'].get(sym, 0.0)
+            return rates
 
     rates = {
         'USD': {'name': '미국 USD',        'value': '0.00', 'change': '0.00', 'status': 'same'},
@@ -79,10 +124,14 @@ def get_exchange_rates():
     # 재시도 로직
     for attempt in range(API_MAX_RETRIES + 1):
         try:
-            res = http_session.get('https://finance.naver.com/marketindex/', timeout=API_TIMEOUT)
+            headers = {'Referer': 'https://finance.naver.com/'}
+            res = http_session.get('https://finance.naver.com/marketindex/', headers=headers, timeout=API_TIMEOUT)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, 'html.parser')
-                for item in soup.select('#exchangeList > li'):
+                items = soup.select('#exchangeList > li')
+                if not items:
+                    print(f"⚠️ [환율] DOM 파싱 실패 (#exchangeList > li 없음). 응답 길이: {len(res.text)}")
+                for item in items:
                     title_el = item.select_one('.h_lst')
                     title    = title_el.text if title_el else ''
                     sym = ('USD' if '미국' in title else
@@ -100,6 +149,7 @@ def get_exchange_rates():
                         'value':  val_el.text if val_el else '0.00',
                         'change': chg_el.text if chg_el else '0.00',
                         'status': status,
+                        'ma120':  fx_ma_cache['data'].get(sym, 0.0)
                     }
                 price_cache['EXCHANGE_RATES'] = {'data': rates, 'time': now}
                 return rates
@@ -121,7 +171,8 @@ def _fetch_52week(ticker):
     for attempt in range(API_MAX_RETRIES + 1):
         try:
             url = f"https://finance.naver.com/item/main.naver?code={ticker}"
-            res = http_session.get(url, timeout=API_TIMEOUT)
+            headers = {'Referer': 'https://finance.naver.com/'}
+            res = http_session.get(url, headers=headers, timeout=API_TIMEOUT)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, 'html.parser')
                 for th in soup.find_all('th'):
@@ -135,6 +186,7 @@ def _fetch_52week(ticker):
                                     return int(float(parts[0])), int(float(parts[1]))
                                 except:
                                     pass
+                print(f"⚠️ [52주 {ticker}] DOM 파싱 실패 (52주 항목 없음)")
             else:
                 print(f'⚠️ [52주 {ticker}] HTTP {res.status_code} (시도 {attempt+1}/{API_MAX_RETRIES+1})')
         except Exception as e:
@@ -144,6 +196,31 @@ def _fetch_52week(ticker):
     print(f'❌ [52주 {ticker}] 모든 재시도 실패')
     return 0, 0
 
+def _fetch_120d_ma(ticker):
+    """네이버 금융 차트 API를 통해 120일 이동평균선을 단일 요청으로 계산합니다."""
+    for attempt in range(API_MAX_RETRIES + 1):
+        try:
+            url = f"https://fchart.stock.naver.com/sise.nhn?symbol={ticker}&timeframe=day&count=120&requestType=0"
+            headers = {'Referer': 'https://finance.naver.com/'}
+            res = http_session.get(url, headers=headers, timeout=API_TIMEOUT)
+            if res.status_code == 200:
+                closes = []
+                for line in res.text.split('\n'):
+                    if '<item data=' in line:
+                        parts = line.split('"')[1].split('|')
+                        if len(parts) >= 5:
+                            closes.append(float(parts[4]))
+                if closes:
+                    return int(sum(closes) / len(closes))
+                else:
+                    print(f"⚠️ [120MA {ticker}] 데이터 파싱 실패. 응답 길이: {len(res.text)}")
+            else:
+                print(f"⚠️ [120MA {ticker}] HTTP {res.status_code} 에러")
+        except Exception as e:
+            print(f'⚠️ [120MA {ticker}] {e}')
+        if attempt < API_MAX_RETRIES:
+            time.sleep(API_RETRY_DELAY)
+    return 0
 
 def get_current_price(ticker):
     now = datetime.now()
@@ -187,18 +264,22 @@ def get_current_price(ticker):
                         last_52w_update = old_data.get('52w_time', datetime.min)
                         if now - last_52w_update > timedelta(hours=12):
                             high52, low52 = _fetch_52week(ticker_code)
+                            ma120 = _fetch_120d_ma(ticker_code)
                             last_52w_update = now
                         else:
                             high52 = old_data.get('high52', 0)
                             low52  = old_data.get('low52',  0)
+                            ma120  = old_data.get('ma120',  0)
 
                         high52 = high52 or old_data.get('high52', 0)
                         low52  = low52  or old_data.get('low52',  0)
+                        ma120  = ma120  or old_data.get('ma120',  0)
 
                         price_cache[ticker] = {
                             'price':        price,
                             'high52':       high52,
                             'low52':        low52,
+                            'ma120':        ma120,
                             'session_high': session_high,
                             'time':         now,
                             '52w_time':     last_52w_update
@@ -513,6 +594,8 @@ def background_alert_worker():
             summary_all = get_portfolio_summary_stats(status)
             total_s     = summary_all.get('통합', {})
             save_portfolio_snapshot(total_s.get('eval', 0), total_s.get('deposit', 0))
+            
+            exchange_rates = get_exchange_rates()
 
             if config.get('enabled') == 'Y' and config.get('token'):
                 alerts = get_alert_settings()
@@ -553,6 +636,9 @@ def background_alert_worker():
                         elif alert['ref_type'] == 'LOW52':
                             ref_val = price_cache.get(ticker, {}).get('low52', 0)
                             ref_name = "52주 최저가"
+                        elif alert['ref_type'] == 'MA120':
+                            ref_val = price_cache.get(ticker, {}).get('ma120', 0)
+                            ref_name = "120일 이평선"
                         elif alert['ref_type'] == 'SESSION_HIGH':
                             ref_val = price_cache.get(ticker, {}).get('session_high', 0)
                             ref_name = "최근 고점"
@@ -613,6 +699,30 @@ def background_alert_worker():
                                         direction = "초과" if dev > 0 else "미달"
                                         msg = f"⚖️ <b>[비중 알림]</b> {item['종목명']} 비중이 목표 대비 {abs(dev)}%p {direction} 상태입니다."
                                         break
+                                        
+                    # 3. 환율 알림 체크
+                    elif alert['type'] == 'EXCHANGE':
+                        currency = alert.get('ticker')
+                        if currency in exchange_rates:
+                            try:
+                                cur_rate = float(str(exchange_rates[currency]['value']).replace(',', ''))
+                                currency_name = exchange_rates[currency]['name']
+                                
+                                ref_type = alert.get('ref_type')
+                                if ref_type == 'MA120':
+                                    target_rate = exchange_rates[currency].get('ma120', 0)
+                                    target_desc = f"120일 이평선({target_rate:,.2f}원)"
+                                else:
+                                    target_rate = float(alert['value'])
+                                    target_desc = f"설정하신 {target_rate:,.2f}원"
+                                    
+                                if target_rate > 0:
+                                    if alert['condition'] == 'ABOVE' and cur_rate >= target_rate:
+                                        msg = f"💱 <b>[환율 알림]</b> {currency_name}\n현재 환율({cur_rate:,.2f}원)이 {target_desc} 이상으로 상승했습니다."
+                                    elif alert['condition'] == 'BELOW' and cur_rate <= target_rate:
+                                        msg = f"💱 <b>[환율 알림]</b> {currency_name}\n현재 환율({cur_rate:,.2f}원)이 {target_desc} 이하로 하락했습니다."
+                            except Exception:
+                                pass
 
                     if msg:
                         if send_telegram_notification(msg):
@@ -784,10 +894,10 @@ def get_portfolio_summary_stats(portfolio_status):
             continue
 
         df_res    = pd.DataFrame(status_list)
-        acc_eval  = df_res['평가금액'].sum()
-        turnover  = round(df_res['비중오차(%p)'].abs().sum() / 2, 2)
-        deposit   = total_net_deposit if acc == '통합' else account_deposits.get(acc, 0)
-        roi       = round(((acc_eval / deposit) - 1) * 100, 2) if deposit > 0 else 0
+        acc_eval  = int(df_res['평가금액'].sum())
+        turnover  = float(round(df_res['비중오차(%p)'].abs().sum() / 2, 2))
+        deposit   = float(total_net_deposit if acc == '통합' else account_deposits.get(acc, 0))
+        roi       = float(round(((acc_eval / deposit) - 1) * 100, 2)) if deposit > 0 else 0.0
 
         # XIRR: 입금 내역(음수) + 오늘 평가액(양수)을 합쳐 연환산 수익률 계산
         flows = (total_cashflows if acc == '통합' else account_cashflows.get(acc, []))
@@ -914,6 +1024,7 @@ def get_portfolio_status(extra_tickers=None):
                 '현재가':      cur_price,
                 'high52':      price_cache.get(ticker, {}).get('high52', 0),
                 'low52':       price_cache.get(ticker, {}).get('low52', 0),
+                'ma120':       price_cache.get(ticker, {}).get('ma120', 0),
                 '매수금액':    buy_amt,
                 '평가금액':    eval_amt,
                 '손익금액':    eval_amt - buy_amt,
@@ -925,7 +1036,7 @@ def get_portfolio_status(extra_tickers=None):
         grouped.append({
             '티커': 'CASH', '종목명': '현금(예수금)', '목표비중(%)': cash_target,
             '보유수량': round(cash_balance), '평단가': 1, '현재가': 1,
-            'high52': 0, 'low52': 0,
+            'high52': 0, 'low52': 0, 'ma120': 0,
             '매수금액': round(cash_balance), '평가금액': round(cash_balance), '손익률(%)': 0.0, '손익금액': 0,
         })
 
@@ -1032,6 +1143,8 @@ def index():
                 ref_val = price_cache.get(ticker, {}).get('high52', 0)
             elif alert.get('ref_type') == 'LOW52':
                 ref_val = price_cache.get(ticker, {}).get('low52', 0)
+            elif alert.get('ref_type') == 'MA120':
+                ref_val = price_cache.get(ticker, {}).get('ma120', 0)
             elif alert.get('ref_type') == 'SESSION_HIGH':
                 ref_val = price_cache.get(ticker, {}).get('session_high', 0)
             elif alert.get('ref_type') == 'ROI':
@@ -1051,6 +1164,11 @@ def index():
                         elif alert.get('condition') == 'DOWN_PCT':
                             alert['target_price'] = ref_val * (1 - val_f / 100)
                 except: pass
+        elif alert.get('type') == 'EXCHANGE' and alert.get('ref_type') == 'MA120':
+            currency = alert.get('ticker')
+            if currency in exchange_data:
+                alert['ref_price'] = exchange_data[currency].get('ma120', 0)
+
 
     cash_balances    = {acc: get_cash_balance(acc) for acc in ACCOUNTS}
     cash_balances['통합'] = sum(cash_balances.values())
@@ -1276,12 +1394,13 @@ def update_global_config():
 
 @app.route('/add_alert', methods=['POST'])
 def add_alert():
+    val = request.form.get('value', '').strip()
     alert_data = {
         'type':      request.form.get('alert_type'),
         'ticker':    request.form.get('ticker', ''),
         'ref_type':  request.form.get('ref_type'),
         'condition': request.form.get('condition'),
-        'value':     request.form.get('value', '0')
+        'value':     val if val else '0'
     }
     save_alert_setting(alert_data)
     return redirect(url_for('index') + '?tab=bot')

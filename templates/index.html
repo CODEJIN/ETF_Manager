@@ -55,9 +55,14 @@
         .bot-config-box { background: #ffffff; border: 1px solid #ddd; padding: 25px; border-radius: 8px; max-width: 800px; margin: 0 auto; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
         .alert-form-bar { background: #f8f9fa; border: 1px solid #dee2e6; padding: 15px; border-radius: 6px; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; overflow-x: auto; }
         .summary-banner { background: #eef2f5; padding: 10px 15px; border-radius: 6px; margin-bottom: 10px; display: flex; gap: 20px; font-size: 0.9em; align-items: center; flex-wrap: wrap; }
+        
+        #toast { visibility: hidden; min-width: 300px; background-color: rgba(44, 62, 80, 0.95); color: #fff; text-align: center; border-radius: 8px; padding: 18px 24px; position: fixed; z-index: 1000; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 1em; box-shadow: 0 6px 16px rgba(0,0,0,0.2); opacity: 0; transition: opacity 0.3s, visibility 0.3s; white-space: pre-line; line-height: 1.5; font-weight: bold; pointer-events: none; }
+        #toast.show { visibility: visible; opacity: 1; }
+        #toast.toast-error { background-color: rgba(231, 76, 60, 0.95); }
     </style>
 </head>
 <body>
+<div id="toast"></div>
 
 <div class="header">
     <h2>📈 ETF 포트폴리오 관리</h2>
@@ -100,6 +105,11 @@
                 {% if exchange[sym]['status'] == 'up' %}<span class="chg up">▲ {{ exchange[sym]['change'] }}</span>
                 {% elif exchange[sym]['status'] == 'down' %}<span class="chg down">▼ {{ exchange[sym]['change'] }}</span>{% endif %}
             </div>
+            {% if exchange[sym].get('ma120') %}
+            <div style="font-size: 0.8em; color: #7f8c8d; margin-top: 5px;">
+                120일 이평선: ₩{{ "{:,.2f}".format(exchange[sym]['ma120']) }}
+            </div>
+            {% endif %}
         </div>
         {% endfor %}
     </div>
@@ -205,7 +215,10 @@
             {% set stats = summary_stats.get(acc_name, {}) if summary_stats else {} %}
 
             {% if acc_name == '통합' %}
-                <h4 style="margin-top:8px; color:#007BFF;">[통합] 계좌 상태</h4>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+                    <h4 style="margin:0; color:#007BFF;">[통합] 계좌 상태</h4>
+                    <button type="button" onclick="copyMarkdown()" class="btn-refresh" style="background-color: #6f42c1; padding: 5px 12px; font-size: 0.85em;">📋 Markdown 복사</button>
+                </div>
             {% else %}
                 <details><summary>[{{ acc_name }}] 계좌 상세 보기</summary>
             {% endif %}
@@ -617,6 +630,7 @@
                     <option value="SESSION_HIGH">실시간 고점 대비(Trailing)</option>
                     <option value="HIGH52">52주 최고가 대비</option>
                     <option value="LOW52">52주 최저가 대비</option>
+                    <option value="MA120">120일 이평선 대비</option>
                     <option value="LAST">마지막 구매가 대비</option>
                     <option value="LAST_SELL">마지막 판매가 대비</option>
                 </select>
@@ -626,6 +640,26 @@
                     <option value="DOWN_PCT">▼ 하향 돌파 시</option>
                 </select>
                 <button type="submit" class="btn-add">➕ 등록</button>
+            </form>
+
+            <h4 style="color:#2c3e50; margin-top: 25px; margin-bottom: 12px;">💱 환율 변동 알림 추가</h4>
+            <form action="{{ url_for('add_alert') }}" method="POST" class="alert-form-bar" style="background-color: #fff9e6; border-color: #ffeeba;">
+                <input type="hidden" name="alert_type" value="EXCHANGE">
+                <select name="ticker" style="width: 130px;" required>
+                    <option value="USD">미국 USD</option>
+                    <option value="JPY">일본 JPY (100엔)</option>
+                    <option value="CNY">중국 CNY</option>
+                </select>
+                <select name="ref_type" style="width: 140px;" onchange="document.getElementById('exchange_val').style.display = (this.value=='FIXED'?'inline-block':'none')">
+                    <option value="FIXED">지정 환율(원)</option>
+                    <option value="MA120">120일 이평선</option>
+                </select>
+                <input type="number" step="0.1" name="value" id="exchange_val" placeholder="예: 1350" style="width: 85px;">
+                <select name="condition" style="width: 130px;">
+                    <option value="ABOVE">이상 상승 시 ▲</option>
+                    <option value="BELOW">이하 하락 시 ▼</option>
+                </select>
+                <button type="submit" class="btn-add" style="background-color: #f39c12;">➕ 등록</button>
             </form>
 
             <h4 style="color:#2c3e50; margin-top: 25px; margin-bottom: 12px;">⚖️ 비중 오차 알림 추가</h4>
@@ -666,16 +700,37 @@
                 <tbody>
                     {% for alert in alerts %}
                     <tr>
-                        <td>{{ '가격' if alert.type == 'PRICE' else '비중' }}</td>
+                        <td>
+                            {% if alert.type == 'PRICE' %}가격
+                            {% elif alert.type == 'PORTFOLIO' %}비중
+                            {% elif alert.type == 'EXCHANGE' %}환율
+                            {% endif %}
+                        </td>
                         <td style="text-align: left;">
-                            <strong>{{ settings_data[alert.ticker].name if alert.ticker in settings_data else '통합 포트폴리오' }}</strong>
+                            {% if alert.type == 'EXCHANGE' %}
+                                <strong>{{ '미국 USD' if alert.ticker == 'USD' else '일본 JPY (100엔)' if alert.ticker == 'JPY' else '중국 CNY' if alert.ticker == 'CNY' else alert.ticker }}</strong>
+                            {% else %}
+                                <strong>{{ settings_data[alert.ticker].name if alert.ticker in settings_data else '통합 포트폴리오' }}</strong>
+                            {% endif %}
                         </td>
                         <td style="text-align: left; font-size: 0.85em; color: #666;">
-                            {% if alert.ref_type == 'AVG' %}평단가 대비
+                            {% if alert.type == 'EXCHANGE' %}
+                                {% if alert.ref_type == 'MA120' %}
+                                    120일 이평선 {% if alert.condition == 'ABOVE' %}상향 돌파 시{% else %}하향 돌파 시{% endif %}
+                                {% else %}
+                                    지정가(₩{{ alert.value }}) {% if alert.condition == 'ABOVE' %}이상 상승 시{% else %}이하 하락 시{% endif %}
+                                {% endif %}
+                                {% if alert.ref_price and alert.ref_price > 0 %}
+                                <div style="font-size: 0.85em; color: #999;">(현재선: ₩{{ "{:,.2f}".format(alert.ref_price) }})</div>
+                                {% elif alert.type == 'EXCHANGE' and alert.ref_type == 'MA120' %}
+                                <div style="font-size: 0.85em; color: #999;">(현재선: 계산 중...)</div>
+                                {% endif %}
+                            {% elif alert.ref_type == 'AVG' %}평단가 대비
                             {% elif alert.ref_type == 'LAST' %}마지막구매가 대비
                             {% elif alert.ref_type == 'LAST_SELL' %}마지막판매가 대비
                             {% elif alert.ref_type == 'HIGH52' %}52주최고가 대비
                             {% elif alert.ref_type == 'LOW52' %}52주최저가 대비
+                            {% elif alert.ref_type == 'MA120' %}120일 이평선 대비
                             {% elif alert.ref_type == 'SESSION_HIGH' %}최근 고점 대비
                             {% elif alert.ref_type == 'ROI' %}지정 수익률(%p) 지점
                             {% elif alert.ref_type == 'TURNOVER' %}전체 비중오차
@@ -684,15 +739,30 @@
                             <div style="font-size: 0.85em; color: #999;">(기준: ₩{{ "{:,.0f}".format(alert.ref_price) }})</div>
                             {% endif %}
                             
-                            {% if alert.condition == 'UP_PCT' %}이상 상승 시
-                            {% elif alert.condition == 'DOWN_PCT' %}이상 하락 시
-                            {% elif alert.condition == 'REL_OVER' %}상대 괴리율
-                            {% else %}이상 도달{% endif %}
+                            {% if alert.type != 'EXCHANGE' %}
+                                {% if alert.condition == 'UP_PCT' %}이상 상승 시
+                                {% elif alert.condition == 'DOWN_PCT' %}이상 하락 시
+                                {% elif alert.condition == 'REL_OVER' %}상대 괴리율
+                                {% else %}이상 도달{% endif %}
+                            {% endif %}
                         </td>
                         <td>
-                            <strong style="color: #0366d6;">{{ alert.value }}{{ '%' if 'PCT' in alert.condition or alert.condition == 'REL_OVER' else '%p' }}</strong>
-                            {% if alert.target_price %}
-                            <div style="font-size: 0.78em; color: #888; margin-top: 2px;">(₩{{ "{:,.0f}".format(alert.target_price) }})</div>
+                            {% if alert.type == 'EXCHANGE' %}
+                                {% if alert.ref_type == 'MA120' %}
+                                    <strong style="color: #f39c12;">이평선 돌파</strong>
+                                    {% if alert.ref_price and alert.ref_price > 0 %}
+                                    <div style="font-size: 0.78em; color: #888; margin-top: 2px;">(₩{{ "{:,.2f}".format(alert.ref_price) }})</div>
+                                    {% else %}
+                                    <div style="font-size: 0.78em; color: #888; margin-top: 2px;">(데이터 수집 중...)</div>
+                                    {% endif %}
+                                {% else %}
+                                    <strong style="color: #f39c12;">₩{{ alert.value }}</strong>
+                                {% endif %}
+                            {% else %}
+                                <strong style="color: #0366d6;">{{ alert.value }}{{ '%' if 'PCT' in alert.condition or alert.condition == 'REL_OVER' else '%p' }}</strong>
+                                {% if alert.target_price %}
+                                <div style="font-size: 0.78em; color: #888; margin-top: 2px;">(₩{{ "{:,.0f}".format(alert.target_price) }})</div>
+                                {% endif %}
                             {% endif %}
                         </td>
                         <td>
@@ -869,6 +939,79 @@ document.addEventListener('DOMContentLoaded', function () {
         { type:'pie', data:{ labels, datasets:[{ data:currents, backgroundColor:colors }] }, options:opts }
     );
 });
+
+// ── 토스트 메시지 표시 함수 ──────────────────────────────────
+function showToast(msg, isError = false) {
+    const toast = document.getElementById("toast");
+    toast.innerText = msg;
+    if (isError) toast.classList.add("toast-error");
+    else toast.classList.remove("toast-error");
+    toast.classList.add("show");
+    setTimeout(() => toast.classList.remove("show"), 2500); // 2.5초 후 사라짐
+}
+
+// ── 마크다운 클립보드 복사 기능 ──────────────────────────────────
+function copyMarkdown() {
+    const statusData = {{ status | tojson | safe }};
+    const summaryStats = {{ summary_stats | default({}) | tojson | safe }};
+    let md = "# 📊 포트폴리오 현재 상태 (LLM 분석용)\n\n";
+    md += `생성 일시: ${new Date().toLocaleString()}\n\n`;
+
+    const accounts = ['통합', 'ISA', 'IRP', '연금저축'];
+    
+    accounts.forEach(acc => {
+        if (!statusData || !statusData[acc] || statusData[acc].length === 0) return;
+        
+        md += `## [${acc}] 계좌 요약\n`;
+        const stats = summaryStats[acc];
+        if (stats) {
+            md += `- 총 입금액: ₩${(stats.deposit || 0).toLocaleString()}\n`;
+            md += `- 총 평가액: ₩${(stats.eval || 0).toLocaleString()}\n`;
+            md += `- 누적 수익률: ${stats.roi || 0}%\n`;
+            if (stats.xirr !== null && stats.xirr !== undefined) {
+                md += `- 연환산 수익률 (XIRR): ${stats.xirr}%\n`;
+            }
+            md += "\n";
+        }
+
+        md += `### 상세 보유 종목\n`;
+        md += `| 종목명 | 티커 | 목표(%) | 현재(%) | 오차(%p) | 보유수량 | 평단가 | 현재가 | 평가총액 | 손익률(%) |\n`;
+        md += `|---|---|---|---|---|---|---|---|---|---|\n`;
+        
+        statusData[acc].forEach(item => {
+            md += `| ${item['종목명']} | ${item['티커']} | ${item['목표비중(%)']} | ${item['현재비중(%)']} | ${item['비중오차(%p)']} | ${item['보유수량']} | ₩${item['평단가'].toLocaleString()} | ₩${item['현재가'].toLocaleString()} | ₩${item['평가금액'].toLocaleString()} | ${item['손익률(%)']}% |\n`;
+        });
+        md += "\n";
+    });
+
+    const successMsg = '✅ 마크다운이 클립보드에 복사되었습니다!\nLLM 프롬프트에 바로 붙여넣기 하세요.';
+    const failMsg = '❌ 클립보드 복사에 실패했습니다.\n권한 설정이나 브라우저를 확인해주세요.';
+
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(md).then(() => {
+            showToast(successMsg);
+        }).catch(err => {
+            console.error('클립보드 복사 실패:', err);
+            showToast(failMsg, true);
+        });
+    } else {
+        // HTTPS가 아닌 환경(HTTP)을 위한 우회(Fallback) 처리
+        const textArea = document.createElement("textarea");
+        textArea.value = md;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        document.body.appendChild(textArea);
+        textArea.select();
+        try {
+            document.execCommand('copy');
+            showToast(successMsg);
+        } catch (err) {
+            console.error('Fallback 클립보드 복사 실패:', err);
+            showToast(failMsg, true);
+        }
+        document.body.removeChild(textArea);
+    }
+}
 </script>
 </body>
 </html>
