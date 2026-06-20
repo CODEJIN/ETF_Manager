@@ -62,34 +62,65 @@ API_RETRY_DELAY = 1
 
 import json
 
-def _fetch_fx_120d_ma(sym):
-    """야후 파이낸스 API를 통해 환율 120일 이동평균선을 계산합니다."""
+def _fetch_yahoo_chart(ticker):
+    """야후 파이낸스에서 150일치 시계열 데이터를 가져와 {timestamp: close} 딕셔너리로 반환합니다."""
     for attempt in range(API_MAX_RETRIES + 1):
         try:
-            yahoo_sym = f"{sym}KRW=X"
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_sym}?range=150d&interval=1d"
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=150d&interval=1d"
             res = http_session.get(url, timeout=API_TIMEOUT)
             if res.status_code == 200:
                 data = res.json()
                 result = data.get('chart', {}).get('result', [])
                 if result:
+                    timestamps = result[0].get('timestamp', [])
                     closes = result[0].get('indicators', {}).get('quote', [{}])[0].get('close', [])
-                    closes = [c for c in closes if c is not None]
-                    if len(closes) >= 120:
-                        closes = closes[-120:]
-                    if closes:
-                        ma = round(sum(closes) / len(closes), 2)
-                        if sym == 'JPY' and ma < 50:
-                            ma *= 100
-                        return ma
-                print(f"⚠️ [FX 120MA {sym}] 야후 API 파싱 실패 또는 빈 결과")
-            else:
-                print(f"⚠️ [FX 120MA {sym}] HTTP {res.status_code} 에러 (시도 {attempt+1}/{API_MAX_RETRIES+1})")
+                    return {t: c for t, c in zip(timestamps, closes) if c is not None}
         except Exception as e:
-            print(f'⚠️ [FX 120MA {sym}] 예외 발생: {e}')
+            print(f'⚠️ [{ticker}] 시계열 데이터 조회 예외: {e}')
         if attempt < API_MAX_RETRIES:
             time.sleep(API_RETRY_DELAY)
-    print(f'❌ [FX 120MA {sym}] 모든 재시도 실패')
+    return {}
+
+def _fetch_fx_120d_ma(sym):
+    """기축통화(USD) 기준의 야후 '재정환율(Cross-rate)' 방식을 사용하여 오류 없는 120일 이평선을 계산합니다."""
+    usd_krw = _fetch_yahoo_chart('USDKRW=X')
+    if not usd_krw:
+        print(f"❌ [FX 120MA] USDKRW=X 기준 데이터 수집 실패")
+        return 0.0
+        
+    if sym == 'USD':
+        closes = [usd_krw[t] for t in sorted(usd_krw.keys())]
+        if len(closes) >= 120: closes = closes[-120:]
+        return round(sum(closes) / len(closes), 2) if closes else 0.0
+
+    # JPY, CNY 등은 USD 대비 환율을 가져와서 재정환율(Cross-Rate) 계산
+    target_ticker = 'JPY=X' if sym == 'JPY' else 'CNY=X'
+    usd_target = _fetch_yahoo_chart(target_ticker)
+    
+    if not usd_target:
+        print(f"❌ [FX 120MA] {target_ticker} 데이터 수집 실패")
+        return 0.0
+
+    # 같은 날짜(timestamp)의 데이터끼리만 매칭하여 계산
+    common_ts = sorted(list(set(usd_krw.keys()) & set(usd_target.keys())))
+    cross_closes = []
+    
+    for ts in common_ts:
+        krw_val = usd_krw[ts]
+        tgt_val = usd_target[ts]
+        if tgt_val > 0:
+            # 원/위안 = (원/달러) / (위안/달러)
+            cross_val = krw_val / tgt_val
+            cross_closes.append(cross_val)
+            
+    if cross_closes:
+        if len(cross_closes) >= 120:
+            cross_closes = cross_closes[-120:]
+        ma = sum(cross_closes) / len(cross_closes)
+        if sym == 'JPY': 
+            ma *= 100  # JPY는 100엔 기준으로 표시
+        return round(ma, 2)
+        
     return 0.0
 
 # ── 환율 크롤링 ──────────────────────────────────────────────
